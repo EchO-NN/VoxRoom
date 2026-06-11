@@ -12,10 +12,9 @@ focuses on the VoxRoom geometry pipeline in Isaac Sim.
 
 ## Pipeline
 
-![VoxRoom pipeline](assets/pipeline.png)
-
-The full-resolution source figure is also included at
-[`assets/pipeline.pdf`](assets/pipeline.pdf).
+<p align="center">
+  <img src="assets/pipeline.png" alt="VoxRoom pipeline" width="100%">
+</p>
 
 VoxRoom is organized into three stages.
 
