@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import select
 import subprocess
@@ -221,10 +222,12 @@ class VoxRoomPopupVisualizer:
         scenegraph_backend: str,
         score_debug: Optional[dict] = None,
         failure_reason: Optional[str] = None,
+        depth: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         panel = self.render(
             step=step,
             rgb=rgb,
+            depth=depth,
             detections_2d=detections_2d,
             occupancy=occupancy,
             navigable=navigable,
@@ -356,7 +359,340 @@ class VoxRoomPopupVisualizer:
         scenegraph_backend: str,
         score_debug: Optional[dict] = None,
         failure_reason: Optional[str] = None,
+        depth: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        return self._render_readme_panel(
+            step=step,
+            rgb=rgb,
+            depth=depth,
+            occupancy=occupancy,
+            navigable=navigable,
+            observed=observed,
+            current_grid=current_grid,
+            pose=pose,
+            frontiers=frontiers,
+            nav_decision=nav_decision,
+            current_path=current_path,
+            full_path=full_path,
+            object_memory=object_memory,
+            goal_category=goal_category,
+        )
+
+    def _render_readme_panel(
+        self,
+        *,
+        step: int,
+        rgb: np.ndarray,
+        depth: Optional[np.ndarray],
+        occupancy: np.ndarray,
+        navigable: np.ndarray,
+        observed: np.ndarray,
+        current_grid: GridCell,
+        pose: Sequence[float],
+        frontiers: Sequence[FrontierCluster],
+        nav_decision: Optional[NavigationDecision],
+        current_path: Sequence[GridCell],
+        full_path: Sequence[GridCell],
+        object_memory: ObjectMemory,
+        goal_category: str,
+    ) -> np.ndarray:
+        panel_w, panel_h = self.panel_size
+        bg = (248, 248, 246)
+        title = (24, 28, 38)
+        border = (220, 220, 220)
+        panel = Image.new("RGB", (panel_w, panel_h), bg)
+        draw = ImageDraw.Draw(panel)
+        title_font = self._truetype_font(24, bold=True)
+        panel_font = self._truetype_font(17, bold=True)
+        draw.text((24, 16), "VoxRoom Online Reconstruction | Step %d" % int(step), fill=title, font=title_font)
+
+        margin = 24
+        gutter = 18
+        header_h = 56
+        cell_w = max(1, (panel_w - margin * 2 - gutter) // 2)
+        cell_h = max(1, (panel_h - header_h - margin * 2 - gutter) // 2)
+        boxes = [
+            (margin, header_h, margin + cell_w, header_h + cell_h),
+            (margin, header_h + cell_h + gutter, margin + cell_w, header_h + cell_h * 2 + gutter),
+            (margin + cell_w + gutter, header_h, margin + cell_w * 2 + gutter, header_h + cell_h),
+            (margin + cell_w + gutter, header_h + cell_h + gutter, margin + cell_w * 2 + gutter, header_h + cell_h * 2 + gutter),
+        ]
+
+        map_shape = tuple(np.asarray(occupancy).shape[:2])
+        crop_bounds = self._readme_crop_bounds(
+            occupancy=np.asarray(occupancy, dtype=bool),
+            navigable=np.asarray(navigable, dtype=bool),
+            observed=np.asarray(observed, dtype=bool),
+            current_grid=current_grid,
+            frontiers=frontiers,
+            nav_decision=nav_decision,
+            current_path=current_path,
+            full_path=full_path,
+            object_memory=object_memory,
+            goal_category=goal_category,
+            shape=map_shape,
+        )
+        content_boxes = [
+            self._readme_panel_box(draw, box, label, panel_font, border)
+            for box, label in zip(boxes, ("RGB", "Depth", "Navigation Map + Room Mask", "Vertical Free Map"))
+        ]
+        self._paste_fit(panel, self._rgb_image(rgb), content_boxes[0], resample=Image.Resampling.BILINEAR)
+        self._paste_fit(panel, self._depth_image(depth), content_boxes[1], resample=Image.Resampling.BILINEAR)
+        self._paste_fit(
+            panel,
+            self._readme_nav_mask_image(
+                occupancy,
+                navigable,
+                observed,
+                crop_bounds,
+                current_grid=current_grid,
+                pose=pose,
+                frontiers=frontiers,
+                nav_decision=nav_decision,
+                current_path=current_path,
+                full_path=full_path,
+            ),
+            content_boxes[2],
+        )
+        self._paste_fit(panel, self._readme_vertical_free_image(map_shape, crop_bounds), content_boxes[3])
+        self._last_overlay_layers = [
+            self._overlay_record("readme_rgb_panel", True, (255, 255, 255), 1, "top-left RGB image"),
+            self._overlay_record("readme_depth_panel", True, (220, 220, 220), 1, "bottom-left depth image"),
+            self._overlay_record("readme_nav_room_mask_panel", True, (250, 250, 247), 1, "top-right no-label navigation map and room masks"),
+            self._overlay_record("readme_vertical_free_panel", True, (122, 33, 158), 1, "bottom-right vertical free map with purple door seeds"),
+        ]
+        return np.asarray(panel, dtype=np.uint8)
+
+    @staticmethod
+    def _truetype_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        ]
+        for candidate in candidates:
+            try:
+                return ImageFont.truetype(candidate, size=int(size))
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _readme_panel_box(
+        draw: ImageDraw.ImageDraw,
+        box: Tuple[int, int, int, int],
+        label: str,
+        panel_font: ImageFont.ImageFont,
+        border: Tuple[int, int, int],
+    ) -> Tuple[int, int, int, int]:
+        x0, y0, x1, y1 = box
+        draw.rounded_rectangle(box, radius=10, fill=(255, 255, 255), outline=border, width=1)
+        draw.text((x0 + 14, y0 + 10), label, fill=(24, 28, 38), font=panel_font)
+        return x0 + 10, y0 + 38, x1 - 10, y1 - 10
+
+    @staticmethod
+    def _rgb_image(rgb: np.ndarray) -> Image.Image:
+        arr = np.asarray(rgb)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            arr = np.zeros((360, 480, 3), dtype=np.uint8)
+        return Image.fromarray(arr[:, :, :3])
+
+    @staticmethod
+    def _depth_image(depth: Optional[np.ndarray]) -> Image.Image:
+        if depth is None:
+            return Image.new("RGB", (480, 360), (232, 232, 232))
+        arr = np.asarray(depth, dtype=np.float32)
+        if arr.ndim != 2:
+            return Image.new("RGB", (480, 360), (232, 232, 232))
+        valid = np.isfinite(arr) & (arr > 0)
+        out = np.zeros((*arr.shape, 3), dtype=np.uint8)
+        out[:] = (232, 232, 232)
+        if np.any(valid):
+            lo, hi = np.percentile(arr[valid], [2.0, 98.0])
+            if hi <= lo:
+                hi = lo + 1.0
+            norm = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+            gray = (255.0 - 210.0 * norm).astype(np.uint8)
+            out[valid] = np.repeat(gray[..., None], 3, axis=2)[valid]
+        return Image.fromarray(out)
+
+    @staticmethod
+    def _paste_fit(canvas: Image.Image, image: Image.Image, box: Tuple[int, int, int, int], *, resample=Image.Resampling.NEAREST) -> None:
+        x0, y0, x1, y1 = box
+        target_w = max(1, int(x1 - x0))
+        target_h = max(1, int(y1 - y0))
+        image = image.convert("RGB")
+        image.thumbnail((target_w, target_h), resample)
+        ox = x0 + (target_w - image.width) // 2
+        oy = y0 + (target_h - image.height) // 2
+        canvas.paste(image, (ox, oy))
+
+    def _readme_crop_bounds(
+        self,
+        *,
+        occupancy: np.ndarray,
+        navigable: np.ndarray,
+        observed: np.ndarray,
+        current_grid: GridCell,
+        frontiers: Sequence[FrontierCluster],
+        nav_decision: Optional[NavigationDecision],
+        current_path: Sequence[GridCell],
+        full_path: Sequence[GridCell],
+        object_memory: ObjectMemory,
+        goal_category: str,
+        shape: Tuple[int, int],
+    ) -> Tuple[int, int, int, int]:
+        content = navigable.astype(bool) | occupancy.astype(bool) | observed.astype(bool)
+        for key in (
+            "voxel_vertical_free_xy",
+            "vertical_free_room_domain",
+            "voxel_wall_xy",
+            "voxel_wall_after_step1_map",
+            "voxel_door_raw_seed_mask",
+            "voxel_door_seed_mask",
+            "voxel_door_seed_line_primitive_mask",
+            "final_room_label_map",
+            "voxel_final_room_label_map",
+        ):
+            arr = self._room_debug_array(key, shape, np.int32 if "label" in key else bool)
+            content |= arr.astype(np.int32) > 0 if "label" in key else arr.astype(bool)
+        r0, r1, c0, c1 = self._map_crop_bounds(
+            occupancy=occupancy,
+            navigable=navigable,
+            observed=observed,
+            current_grid=current_grid,
+            frontiers=frontiers,
+            nav_decision=nav_decision,
+            current_path=current_path,
+            full_path=full_path,
+            object_memory=object_memory,
+            goal_category=goal_category,
+        )
+        rr, cc = np.nonzero(content)
+        if rr.size:
+            pad = max(20, int(round(min(shape) * 0.035)))
+            r0 = max(0, min(r0, int(rr.min()) - pad))
+            r1 = min(shape[0], max(r1, int(rr.max()) + pad + 1))
+            c0 = max(0, min(c0, int(cc.min()) - pad))
+            c1 = min(shape[1], max(c1, int(cc.max()) + pad + 1))
+        return r0, r1, c0, c1
+
+    def _readme_nav_mask_image(
+        self,
+        occupancy: np.ndarray,
+        navigable: np.ndarray,
+        observed: np.ndarray,
+        crop_bounds: Tuple[int, int, int, int],
+        *,
+        current_grid: GridCell,
+        pose: Sequence[float],
+        frontiers: Sequence[FrontierCluster],
+        nav_decision: Optional[NavigationDecision],
+        current_path: Sequence[GridCell],
+        full_path: Sequence[GridCell],
+    ) -> Image.Image:
+        nav = np.asarray(navigable, dtype=bool)
+        occ = np.asarray(occupancy, dtype=bool)
+        obs = np.asarray(observed, dtype=bool)
+        shape = tuple(nav.shape)
+        outside = self._room_debug_array("voxel_outside_xy", shape, bool)
+        image = np.zeros((*shape, 3), dtype=np.uint8)
+        image[:] = (232, 232, 232)
+        image[obs | nav] = (250, 250, 247)
+        image[~obs | outside] = (232, 232, 232)
+        image[occ] = (88, 88, 88)
+        for idx, room in enumerate(self._active_room_masks(shape)[:64]):
+            mask = np.asarray(getattr(room, "mask", None), dtype=bool)
+            if mask.shape != shape or not np.any(mask):
+                continue
+            if np.count_nonzero(mask) < self._min_room_mask_cells():
+                continue
+            color = np.asarray(self._room_color(idx), dtype=np.float32)
+            image[mask] = np.clip(image[mask].astype(np.float32) * 0.58 + color[None, :] * 0.42, 0, 255).astype(np.uint8)
+        image[occ] = (88, 88, 88)
+        self._paint_cells_on_map(image, full_path, crop_bounds, (135, 185, 255), radius=1, max_cells=1800)
+        self._paint_cells_on_map(image, current_path, crop_bounds, (0, 102, 255), radius=2, max_cells=800)
+        frontier_members: List[GridCell] = []
+        for frontier in frontiers[:64]:
+            frontier_members.extend(frontier.members)
+        if self.show_frontier_member_cells:
+            self._paint_cells_on_map(image, frontier_members, crop_bounds, (0, 185, 210), radius=1, max_cells=1200)
+        self._paint_cells_on_map(image, [frontier.center_grid for frontier in frontiers[:64]], crop_bounds, (0, 215, 245), radius=3, max_cells=64)
+        selected_frontier = None
+        if nav_decision is not None and nav_decision.frontier_decision is not None:
+            selected_frontier = nav_decision.frontier_decision.selected_frontier
+        if selected_frontier is not None:
+            self._paint_cells_on_map(image, [selected_frontier.center_grid], crop_bounds, (255, 220, 40), radius=5, max_cells=1)
+        planner_target = current_path[-1] if current_path else None
+        if planner_target is None and nav_decision is not None and nav_decision.target_cells:
+            planner_target = nav_decision.target_cells[0]
+        if planner_target is not None:
+            self._paint_cells_on_map(image, [planner_target], crop_bounds, (255, 145, 35), radius=4, max_cells=1)
+        self._paint_cells_on_map(image, [current_grid], crop_bounds, (235, 50, 55), radius=4, max_cells=1)
+        r0, r1, c0, c1 = crop_bounds
+        return Image.fromarray(image[r0:r1, c0:c1])
+
+    @staticmethod
+    def _paint_cells_on_map(
+        image: np.ndarray,
+        cells: Iterable[GridCell],
+        crop_bounds: Tuple[int, int, int, int],
+        color: Tuple[int, int, int],
+        *,
+        radius: int,
+        max_cells: int,
+    ) -> int:
+        r0, r1, c0, c1 = crop_bounds
+        cell_list = list(cells or [])
+        if not cell_list:
+            return 0
+        stride = max(1, len(cell_list) // max(1, int(max_cells)))
+        drawn = 0
+        h, w = image.shape[:2]
+        for cell in cell_list[::stride][:max_cells]:
+            r, c = int(cell[0]), int(cell[1])
+            if not (int(r0) <= r < int(r1) and int(c0) <= c < int(c1)):
+                continue
+            rr0 = max(0, r - int(radius))
+            rr1 = min(h, r + int(radius) + 1)
+            cc0 = max(0, c - int(radius))
+            cc1 = min(w, c + int(radius) + 1)
+            image[rr0:rr1, cc0:cc1] = np.asarray(color, dtype=np.uint8)
+            drawn += 1
+        return drawn
+
+    def _readme_vertical_free_image(self, shape: Tuple[int, int], crop_bounds: Tuple[int, int, int, int]) -> Image.Image:
+        vertical_free = (
+            self._room_debug_array("voxel_vertical_free_xy", shape, bool)
+            | self._room_debug_array("vertical_free_room_domain", shape, bool)
+        )
+        wall = (
+            self._room_debug_array("voxel_wall_xy", shape, bool)
+            | self._room_debug_array("voxel_wall_after_step1_map", shape, bool)
+            | self._room_debug_array("structural_wall_clean", shape, bool)
+        )
+        door_seed = (
+            self._room_debug_array("voxel_door_raw_seed_mask", shape, bool)
+            | self._room_debug_array("voxel_door_seed_mask", shape, bool)
+            | self._room_debug_array("voxel_door_seed_line_primitive_mask", shape, bool)
+        )
+        image = np.zeros((*shape, 3), dtype=np.uint8)
+        image[:] = (232, 232, 232)
+        image[vertical_free] = (250, 250, 247)
+        image[wall] = (166, 53, 38)
+        image[door_seed] = (122, 33, 158)
+        r0, r1, c0, c1 = crop_bounds
+        return Image.fromarray(image[r0:r1, c0:c1])
+
+    def _min_room_mask_cells(self) -> int:
+        raw = self._room_segmentation_debug.get("map_resolution_m", 0.05)
+        try:
+            resolution = float(np.asarray(raw).reshape(-1)[0])
+        except Exception:
+            resolution = 0.05
+        return max(1, int(math.ceil(0.3 / max(resolution * resolution, 1e-12))))
+
         panel_w, panel_h = self.panel_size
         right_w = max(1, int(panel_w * 0.60))
         left_w = panel_w - right_w

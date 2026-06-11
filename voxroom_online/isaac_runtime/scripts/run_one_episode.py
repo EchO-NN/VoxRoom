@@ -873,6 +873,50 @@ def _roomseg_memory_snapshot_arrays(room_segmenter: object | None) -> dict[str, 
     return out
 
 
+def _roomseg_observation_snapshot_arrays(
+    obs: Mapping[str, object] | None,
+    *,
+    rgb: np.ndarray | None = None,
+    current_path: Sequence[Sequence[int]] | None = None,
+    full_path: Sequence[Sequence[int]] | None = None,
+) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    obs_map = dict(obs or {})
+    rgb_array = rgb
+    if rgb_array is None and bool(obs_map.get("has_rgb")) and str(obs_map.get("rgb_device", "")) == "cpu":
+        candidate = obs_map.get("rgb")
+        if candidate is not None:
+            rgb_array = np.asarray(candidate)
+    if rgb_array is not None:
+        out["demo_rgb"] = np.asarray(rgb_array, dtype=np.uint8)
+    depth_array = obs_map.get("depth") if bool(obs_map.get("has_depth", "depth" in obs_map)) else None
+    if depth_array is not None:
+        out["demo_depth_m"] = np.asarray(depth_array, dtype=np.float32)
+    pose_world = obs_map.get("pose_world")
+    if pose_world is not None:
+        out["demo_pose_world"] = np.asarray(pose_world, dtype=np.float32)
+    camera_pose_world = obs_map.get("camera_pose_world")
+    if camera_pose_world is not None:
+        out["demo_camera_pose_world"] = np.asarray(camera_pose_world, dtype=np.float32)
+    out["demo_current_path_rc"] = _path_cells_array(current_path)
+    out["demo_full_path_rc"] = _path_cells_array(full_path)
+    return out
+
+
+def _path_cells_array(cells: Sequence[Sequence[int]] | None) -> np.ndarray:
+    if not cells:
+        return np.zeros((0, 2), dtype=np.int32)
+    out: list[list[int]] = []
+    for cell in cells:
+        try:
+            if len(cell) < 2:  # type: ignore[arg-type]
+                continue
+            out.append([int(cell[0]), int(cell[1])])
+        except Exception:
+            continue
+    return np.asarray(out, dtype=np.int32).reshape((-1, 2))
+
+
 def apply_episode_planning_clearance(
     scene_dir: Path,
     map_info: MapInfo,
@@ -4251,6 +4295,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
             frontier_map: np.ndarray | None = None,
             selected_frontier_members: Sequence[Sequence[int]] | None = None,
             selected_frontier_center_rc: Sequence[int] | None = None,
+            observation_npz_arrays: Mapping[str, object] | None = None,
         ) -> dict | None:
             if not bool(getattr(args, "save_roomseg_snapshots", False)):
                 return None
@@ -4263,6 +4308,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
             extra_npz_arrays = {
                 **dict(voxel_snapshot_arrays or {}),
                 **dict(memory_snapshot_arrays or {}),
+                **dict(observation_npz_arrays or {}),
                 **map_info_extra_arrays(map_state.get("map_info")),
             }
             nav_free_mask, nav_obstacle_mask, nav_unknown_mask, _nav_source = resolve_replay_style_navigation_masks(
@@ -4392,6 +4438,13 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                 "selected_frontier_changed_from_last_snapshot": selected_changed,
             }
             live_baseline_obs = obs if isinstance(obs, dict) else None
+            observation_rgb = None
+            if live_baseline_obs is not None:
+                try:
+                    observation_rgb = viz_rgb(live_baseline_obs)
+                except Exception as exc:
+                    print("[voxroom-snapshot] RGB capture for README/demo snapshot failed: %s" % exc, file=sys.stderr, flush=True)
+                    observation_rgb = None
             if (
                 getattr(live_baseline_manager, "baseline_name", "") == "tvars_original_isaac"
                 and not (
@@ -4420,6 +4473,12 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                 frontier_map=frontier_layers.get("frontier") if frontier_layers is not None else None,
                 selected_frontier_members=selected_members,
                 selected_frontier_center_rc=selected_center,
+                observation_npz_arrays=_roomseg_observation_snapshot_arrays(
+                    live_baseline_obs,
+                    rgb=observation_rgb,
+                    current_path=current_path,
+                    full_path=full_path,
+                ),
             )
             if snapshot is None:
                 return
@@ -4652,6 +4711,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                     viz.update(
                         step=pano_step,
                         rgb=viz_rgb(obs),
+                        depth=obs.get("depth") if isinstance(obs, dict) else None,
                         detections_2d=[],
                         occupancy=map_state["occupancy"],
                         navigable=map_state["free"],
@@ -4693,6 +4753,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                 viz.update(
                     step=pano_step,
                     rgb=viz_rgb(obs),
+                    depth=obs.get("depth") if isinstance(obs, dict) else None,
                     detections_2d=last_detections_2d,
                     occupancy=map_state["occupancy"],
                     navigable=map_state["free"],
@@ -4781,6 +4842,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                     viz.update(
                         step=step,
                         rgb=viz_rgb(obs),
+                        depth=obs.get("depth") if isinstance(obs, dict) else None,
                         detections_2d=[],
                         occupancy=occupancy,
                         navigable=free,
@@ -6156,6 +6218,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                         viz.update(
                             step=step,
                             rgb=viz_rgb(obs),
+                            depth=obs.get("depth") if isinstance(obs, dict) else None,
                             detections_2d=last_detections_2d,
                             occupancy=occupancy,
                             navigable=free,
@@ -6183,6 +6246,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                         viz.update(
                             step=step,
                             rgb=viz_rgb(obs),
+                            depth=obs.get("depth") if isinstance(obs, dict) else None,
                             detections_2d=last_detections_2d,
                             occupancy=occupancy,
                             navigable=free,
@@ -6247,6 +6311,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                         viz.update(
                             step=step,
                             rgb=viz_rgb(obs),
+                            depth=obs.get("depth") if isinstance(obs, dict) else None,
                             detections_2d=last_detections_2d,
                             occupancy=occupancy,
                             navigable=free,
@@ -6459,6 +6524,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                         viz.update(
                             step=step,
                             rgb=viz_rgb(obs),
+                            depth=obs.get("depth") if isinstance(obs, dict) else None,
                             detections_2d=last_detections_2d,
                             occupancy=occupancy,
                             navigable=free,
@@ -6617,6 +6683,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                 viz.update(
                     step=step,
                     rgb=viz_rgb(obs),
+                    depth=obs.get("depth") if isinstance(obs, dict) else None,
                     detections_2d=last_detections_2d,
                     occupancy=occupancy,
                     navigable=free,
@@ -6881,6 +6948,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                         viz.update(
                             step=step,
                             rgb=viz_rgb(obs),
+                            depth=obs.get("depth") if isinstance(obs, dict) else None,
                             detections_2d=last_detections_2d,
                             occupancy=occupancy,
                             navigable=free,
@@ -7049,6 +7117,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                         viz.update(
                             step=step,
                             rgb=viz_rgb(obs),
+                            depth=obs.get("depth") if isinstance(obs, dict) else None,
                             detections_2d=last_detections_2d,
                             occupancy=occupancy,
                             navigable=free,
@@ -7084,6 +7153,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                     viz.update(
                         step=step,
                         rgb=viz_rgb(obs),
+                        depth=obs.get("depth") if isinstance(obs, dict) else None,
                         detections_2d=last_detections_2d,
                         occupancy=occupancy,
                         navigable=free,

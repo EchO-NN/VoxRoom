@@ -18,6 +18,8 @@ fi
 SCENE_ID="$(basename "$EPISODE_FILE" .jsonl)"
 RUN_DIR="${RUN_DIR:-result/single_scene_random_frontier/$SCENE_ID}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-$RUN_DIR/roomseg_snapshots}"
+VOXROOM_VIZ_SAVE_DIR="${VOXROOM_VIZ_SAVE_DIR:-$RUN_DIR/voxroom_viz_frames}"
+VOXROOM_VIZ_SAVE_EVERY_STEPS="${VOXROOM_VIZ_SAVE_EVERY_STEPS:-1}"
 ROOM_MAP_MODE="${ROOM_MAP_MODE:-voxel_occupancy_door_wall_v33_vlm}"
 ROOMSEG_BACKEND="${ROOMSEG_BACKEND:-voxel_occupancy_door_wall_v33}"
 ROBOT_RADIUS_M="${ROBOT_RADIUS_M:-0.05}"
@@ -63,6 +65,8 @@ VOXROOM_VOXEL_CPU_NUMBA_THREADS="${VOXROOM_VOXEL_CPU_NUMBA_THREADS:-${VOXROOM_NU
   $HEADLESS_FLAG \
   --voxroom-viz \
   --voxroom-viz-every-steps 1 \
+  --voxroom-viz-save-dir "$VOXROOM_VIZ_SAVE_DIR" \
+  --voxroom-viz-save-every-steps "$VOXROOM_VIZ_SAVE_EVERY_STEPS" \
   --save-roomseg-snapshots \
   --roomseg-snapshot-dir "$SNAPSHOT_DIR" \
   --roomseg-snapshot-max-saves "$ROOMSEG_SNAPSHOT_MAX_SAVES" \
