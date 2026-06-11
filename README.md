@@ -12,28 +12,28 @@ focuses on the VoxRoom geometry pipeline in Isaac Sim.
 
 ## Pipeline
 
-```text
-Isaac Sim RGB-D observations
-        |
-        v
-DDA voxel integration
-        |
-        +-- navigation free / occupied / unknown projection
-        |
-        +-- vertical free map and wall-column evidence
-        |
-        v
-wall gap completion
-        |
-        v
-door seed detection on no-clearance navigation free space
-        |
-        v
-door completion with line-shape constraints and stateful memory
-        |
-        v
-door-line room partitioning and room-mask snapshots
-```
+![VoxRoom pipeline](assets/pipeline.png)
+
+The full-resolution source figure is also included at
+[`assets/pipeline.pdf`](assets/pipeline.pdf).
+
+VoxRoom is organized into three stages.
+
+**(A) Sensor-Aware Voxel Memory.** Isaac Sim provides a stream of RGB-D
+observations and robot poses. VoxRoom integrates depth rays into a persistent
+3D voxel memory with four geometric states: free, occupied, unknown outside the
+sensor range, and occluded unknown inside the current sensing range.
+
+**(B) Columnar Projection.** The 3D memory is reduced into column signatures.
+Each vertical column is classified as a strict wall column, occluded wall
+column, free column, entry-seed column, or unknown column. This produces a raw
+structural map containing wall anchors and entry-seed evidence on the
+no-clearance navigation free map.
+
+**(C) Room-Mask Readout.** The structural map is refined by wall-anchor
+completion, entry-seed completion, PCA-style line fitting, and accepted
+separator selection. The resulting separator set partitions the explored space
+into final room masks.
 
 The current paper configuration uses:
 
@@ -281,4 +281,3 @@ to fetch or build baseline code when running formal comparisons.
 ## Citation
 
 The paper citation will be added after release.
-
