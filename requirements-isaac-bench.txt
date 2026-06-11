@@ -1,0 +1,13 @@
+numpy
+descartes
+pyyaml
+pillow
+pytest
+shapely
+skan
+scipy
+matplotlib
+tqdm
+requests
+pyzmq
+numba

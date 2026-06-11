@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime outputs
+result/*
+!result/README.md
+data/interioragent_preprocessed_radius005/*
+!data/interioragent_preprocessed_radius005/.gitkeep
+data/interioragent_episodes/radius005_all_scenes/*
+!data/interioragent_episodes/radius005_all_scenes/.gitkeep
+
+# Heavy external code/checkpoints
+external_baselines/*
+!external_baselines/README.md
+
+# Local environment
+.env
+.venv/
+venv/
+*.log
+
+# Isaac / generated assets
+*.usd.tmp
+*.kit.log
+

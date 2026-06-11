@@ -1,0 +1,59 @@
+room_names:
+  - bedroom
+  - living room
+  - bathroom
+  - kitchen
+  - dining room
+  - office room
+  - gym
+  - lounge
+  - laundry room
+
+related_category_pairs:
+  - [bed, nightstand]
+  - [wardrobe, dresser]
+  - [bookshelf, chair]
+  - [counter, stove]
+  - [table, chair]
+  - [sink, mirror]
+  - [shower, bathtub]
+  - [refrigerator, freezer]
+  - [oven, microwave]
+  - [washing machine, dryer]
+  - [sofa, table]
+  - [desk, chair]
+  - [computer, tv]
+  - [tv, sofa]
+  - [tv, table]
+  - [vase, table]
+  - [lamp, table]
+
+goal_room_priors:
+  bed: [bedroom]
+  nightstand: [bedroom]
+  dresser: [bedroom]
+  wardrobe: [bedroom]
+  sofa: [living room, lounge]
+  tv: [living room, lounge, bedroom]
+  table: [dining room, living room, kitchen, office room]
+  chair: [dining room, living room, office room]
+  desk: [office room, bedroom]
+  bookshelf: [office room, living room, bedroom]
+  sink: [bathroom, kitchen]
+  toilet: [bathroom]
+  bathtub: [bathroom]
+  shower: [bathroom]
+  refrigerator: [kitchen]
+  stove: [kitchen]
+  oven: [kitchen]
+  microwave: [kitchen]
+  cabinet: [kitchen, bathroom, bedroom]
+  vase: [living room, dining room, bedroom]
+  lamp: [living room, bedroom, office room]
+
+aliases:
+  tv_monitor: tv
+  television: tv
+  chest_of_drawers: dresser
+  couch: sofa
+  office chair: chair

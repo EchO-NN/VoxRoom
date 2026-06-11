@@ -1,0 +1,31 @@
+canonical:
+  sofa:
+    - couch
+    - settee
+    - loveseat
+  tv:
+    - television
+    - monitor_tv
+    - tv_monitor
+  dining_table:
+    - dinner_table
+    - table_dining
+  chair:
+    - dining_chair
+    - armchair
+    - seat
+  toilet:
+    - closestool
+  sink:
+    - basin
+  cabinet:
+    - bathroom_cabinet
+    - kitchen_cabinet
+
+strip_instance_regexes:
+  - "[_\\-. ]?\\d+$"
+  - "[_\\-. ]?copy[_\\-. ]?\\d*$"
+  - "[_\\-. ]?instance[_\\-. ]?\\d*$"
+  - "[_\\-. ]?inst[_\\-. ]?\\d*$"
+  - "[_\\-. ]?[a-f0-9]{6,}$"
+

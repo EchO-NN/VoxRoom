@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxroom-online"
+version = "0.1.0"
+description = "Online voxel room segmentation and random-frontier exploration in Isaac Sim"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "descartes",
+  "pyyaml",
+  "pillow",
+  "shapely",
+  "skan",
+  "scipy",
+  "matplotlib",
+  "numba",
+  "tqdm",
+  "requests",
+  "pyzmq",
+]
+
+[tool.setuptools.packages.find]
+include = ["voxroom_online*"]
+
+[project.scripts]
+voxroom-roomseg-eval = "voxroom_online.isaac_runtime.evaluation.online_roomseg.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
