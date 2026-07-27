@@ -711,6 +711,8 @@ class Topomap_construction():
             segment_evidence.update(
                 {
                     "trajectory_point_count": int(trace.shape[0]),
+                    "trajectory_start": trace[0].tolist(),
+                    "trajectory_end": trace[-1].tolist(),
                     "waypoint_separation": separation,
                     "source_side_distance": source_side_distance,
                     "target_side_distance": target_side_distance,
