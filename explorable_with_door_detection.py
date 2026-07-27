@@ -1,6 +1,10 @@
 import time
 from collections import deque
+import json
 import os
+from pathlib import Path
+import subprocess
+import uuid
 import cv2
 
 
@@ -52,6 +56,24 @@ def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
     #print('new boundary {}'.format([gx1, gx2, gy1, gy2]))
     return [gx1, gx2, gy1, gy2]
 
+
+def as_numpy(value):
+    if not torch.is_tensor(value):
+        raise TypeError("expected the Tensor contract emitted by VecPyTorch")
+    return value.detach().cpu().numpy()
+
+
+def write_json_atomic(path, payload):
+    path = Path(path)
+    temporary_path = path.with_name(".{}.{}.tmp".format(path.name, os.getpid()))
+    with temporary_path.open("w", encoding="utf-8") as output:
+        json.dump(payload, output, indent=2, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary_path, path)
+
+
 explorable_threshold = 3.15
 args = get_args()
 
@@ -66,7 +88,8 @@ full_w, full_h = map_size, map_size
 local_w, local_h = int(full_w / args.global_downscaling), \
                    int(full_h / args.global_downscaling)  # 240 pix
 
-full_pose = torch.zeros(1, 3).float().cuda()
+initial_device = torch.device("cuda:0" if args.cuda else "cpu")
+full_pose = torch.zeros(1, 3, device=initial_device).float()
 full_pose[:, :2] = args.map_size_cm / 100.0 / 2.0  # 12, 12, 0
 locs = full_pose.cpu().numpy()
 r, c = locs[0, 1], locs[0, 0]
@@ -119,6 +142,9 @@ cov_area_list = []
 step_list = []
 log_num = 0
 last_goal = None
+last_episode_action_count = 0
+last_episode_cov_ratio = 0.0
+last_episode_cov_area = 0.0
 #frontier_failed = []
 
 established_graph = None  # if not using, equals to None
@@ -144,6 +170,60 @@ def main():
     #print("Dumping at {}".format(log_dir))
     print(args)
     logging.info(args)
+    args.run_id = args.run_id or str(uuid.uuid4())
+    run_dir = Path(args.run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = run_dir / "progress.jsonl"
+    if progress_path.exists():
+        raise FileExistsError("Progress file already exists: {}".format(progress_path))
+    source_root = Path(__file__).resolve().parent
+    source_commit = subprocess.check_output(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    source_changes = subprocess.check_output(
+        ["git", "-C", str(source_root), "status", "--porcelain"],
+        text=True,
+    ).strip()
+    if source_changes:
+        raise RuntimeError("Refusing to run from a dirty source tree")
+    started_at = time()
+    write_json_atomic(
+        run_dir / "run_metadata.json",
+        {
+            "run_id": args.run_id,
+            "process_id": os.getpid(),
+            "started_at_unix": started_at,
+            "requested_max_episode_steps": int(args.max_episode_length),
+            "source_commit": source_commit,
+            "detector_device": args.detector_device,
+            "detr_source_dir": args.detr_source_dir,
+            "visualization": bool(args.visualize),
+            "window_title": args.window_title,
+        },
+    )
+
+    def append_progress(step, info):
+        event = {
+            "run_id": args.run_id,
+            "process_id": os.getpid(),
+            "step": int(step),
+            "simulator_step": int(info["time"]),
+            "scene_name": str(info.get("scene_name", "")),
+            "explored_ratio": float(info.get("exp_ratio") or 0.0),
+            "explored_reward": float(info.get("exp_reward") or 0.0),
+            "timestamp_unix": time(),
+        }
+        with progress_path.open("a", encoding="utf-8") as progress_file:
+            progress_file.write(json.dumps(event, sort_keys=True) + "\n")
+            progress_file.flush()
+            os.fsync(progress_file.fileno())
+
+    live_figure = None
+
+    def activate_live_figure():
+        if live_figure is not None:
+            plt.figure(live_figure.number)
 
     # Logging and loss variables
     num_scenes = args.num_processes
@@ -183,6 +263,8 @@ def main():
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
     obs, infos = envs.reset()
+    if args.visualize or args.print_images:
+        live_figure = plt.figure(num=args.window_title, figsize=(14, 7))
 
     # Initialize map variables
     ### Full map consists of 4 channels containing the following:
@@ -290,6 +372,9 @@ def main():
             global stage1_door_map
             global stage2_door_map
             global stage3_door_map
+            global last_episode_action_count
+            global last_episode_cov_ratio
+            global last_episode_cov_area
 
             """if action != 4:
                 action_count += 1
@@ -305,10 +390,16 @@ def main():
                     scene_name = scene_name[:-4]
 
                     take_name_flag = False
-                if done:  # means this round should be over  action_count == args.max_episode_length - 1
+                completed_step = action_count + 1
+                append_progress(completed_step, infos[0])
+                if bool(np.asarray(done).reshape(-1)[0]):  # means this round should be over
+                    last_episode_action_count = completed_step
+                    last_episode_cov_ratio = float(infos[0]["exp_ratio"])
+                    last_episode_cov_area = float(infos[0]["exp_reward"]) * 50.0
                     
                     
                     
+                    activate_live_figure()
                     plt.ion()
                     plt.clf()
                     plt.plot(cov_ratio_list)
@@ -329,7 +420,7 @@ def main():
                     raw_detect_list.clear()
                     bot_last_loc.clear()
                     return np.array([None]), np.array([None]), np.array([None]), False
-                action_count += 1
+                action_count = completed_step
                 # print(infos[0]['sensor_pose'])
                 # print(locs)
                 # locs = locs + infos[0]['sensor_pose']
@@ -411,8 +502,8 @@ def main():
                 for _ in range(150):
                     output = envs.get_short_term_goal(planner_inputs)
                     # print(output)
-                    dist = output[0][0].cpu().detach().numpy()
-                    stg = output[0][1:].cpu().detach().numpy()
+                    dist = as_numpy(output[0][0])
+                    stg = as_numpy(output[0][1:])
                     stg_x, stg_y = stg
                     # global_stg = np.array([stg_y, stg_x]) + np.array([origins[0][0] * 100 / 5, origins[0][1] * 100 / 5])
                     # global_stg = np.array([stg_y, stg_x]) + np.array([origins[0][0] * 100 / 5, origins[0][1] * 100 / 5])
@@ -453,7 +544,7 @@ def main():
                     p_input['pose_pred'] = planner_pose_inputs[0]
                     p_input['mid_out'] = True
                 output = envs.get_short_term_goal(planner_inputs)
-                stg = output[0][1:].cpu().detach().numpy()
+                stg = as_numpy(output[0][1:])
 
                 # stg = stg.tolist()  # under local frame
                 stg_x, stg_y = stg
@@ -473,6 +564,7 @@ def main():
                 # stg_x = stg_x + origins[0][1]*100/args.map_resolution
                 # stg_y = stg_y + origins[0][0]*100/args.map_resolution
                 stg = [stg_x * args.map_resolution / 100, stg_y * args.map_resolution / 100]
+                activate_live_figure()
                 plt.ion()
 
                 plt.clf()
@@ -522,6 +614,7 @@ def main():
                         scene_name = scene_name[:-4]
                         take_name_flag = False
                     action_count += 1
+                    append_progress(action_count, infos[0])
                     exp_ratio = infos[0]['exp_ratio']
                     exp_area = infos[0]['exp_reward'] * 50.0  # convert to m2
                     time_cost_current = time() - t_start
@@ -529,9 +622,13 @@ def main():
                     step_list.append(time_cost_current)
                     cov_ratio_list.append(exp_ratio)
                     cov_area_list.append(exp_area)
-                    if done:  # means this round should be over  action_count == args.max_episode_length - 1
+                    if bool(np.asarray(done).reshape(-1)[0]):  # means this round should be over
+                        last_episode_action_count = action_count
+                        last_episode_cov_ratio = float(cov_ratio_list[-1]) if cov_ratio_list else 0.0
+                        last_episode_cov_area = float(cov_area_list[-1]) if cov_area_list else 0.0
 
                         
+                        activate_live_figure()
                         plt.ion()
                         plt.clf()
                         plt.plot(cov_ratio_list)
@@ -589,6 +686,7 @@ def main():
                     #np.save('paper_fig/{}.npy'.format(turn_num), obs[0].cpu().detach().numpy().astype(np.uint8).transpose(1, 2, 0))
                     #np.save('paper_fig/depth{}.npy'.format(turn_num),
                     #        depth_image)
+                    activate_live_figure()
                     plt.ion()
                     plt.clf()
                     plt.cla()
@@ -596,7 +694,6 @@ def main():
                     #plt.show()
                     plt.pause(0.1)
                     plt.ioff()
-                plt.close()
                     # plt.imsave('pic_save/{}.png'.format(action_count), obs_show)
                 # print('origin {}'.format(origins[0]))
                 # print('absolute_locs {}'.format(absolute_locs))
@@ -676,9 +773,9 @@ def main():
                     for _ in range(150):  # 150
                         output = envs.get_short_term_goal(planner_inputs)
                         # print(output)
-                        dist = output[0][0].cpu().detach().numpy()
+                        dist = as_numpy(output[0][0])
                         total_dist += dist
-                        stg = output[0][1:].cpu().detach().numpy()
+                        stg = as_numpy(output[0][1:])
                         stg_x, stg_y = stg
                         # global_stg = np.array([stg_y, stg_x]) + np.array([origins[0][0] * 100 / 5, origins[0][1] * 100 / 5])
                         list_x.append(stg_x + origins[0][1] * 100 / 5)
@@ -950,7 +1047,7 @@ def main():
                         p_input['pose_pred'] = planner_pose_inputs[0]
                         p_input['mid_out'] = True
                     output = envs.get_short_term_goal(planner_inputs_frontier)
-                    stg = output[0][1:].cpu().detach().numpy()
+                    stg = as_numpy(output[0][1:])
                     # stg = stg.tolist()  # under local frame
                     stg_x, stg_y = stg
                     # stg_x = stg_x + origins[0][1]*100/args.map_resolution
@@ -1144,6 +1241,28 @@ def main():
 
         exploration(locs)
 
+        summary = {
+            "status": "completed",
+            "run_id": args.run_id,
+            "process_id": os.getpid(),
+            "started_at_unix": started_at,
+            "finished_at_unix": time(),
+            "scene_name": scene_name,
+            "requested_max_episode_steps": int(args.max_episode_length),
+            "source_commit": source_commit,
+            "executed_steps": int(last_episode_action_count or action_count),
+            "explored_ratio": float(last_episode_cov_ratio or cov_ratio),
+            "explored_area": float(last_episode_cov_area or cov_area),
+            "visualization": bool(args.visualize),
+            "window_title": args.window_title,
+            "detector_device": args.detector_device,
+            "detr_source_dir": args.detr_source_dir,
+            "progress_file": progress_path.name,
+        }
+        write_json_atomic(run_dir / "result.json", summary)
+        envs.close()
+        plt.close("all")
+
 
 
         
@@ -1181,4 +1300,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

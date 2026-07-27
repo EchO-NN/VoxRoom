@@ -40,7 +40,7 @@ class MapBuilder(object):
 
     def update_map(self, depth, current_pose, clear_map=False):
         with np.errstate(invalid="ignore"):
-            depth[depth > self.vision_range * self.resolution] = np.NaN
+            depth[depth > self.vision_range * self.resolution] = np.nan
         point_cloud = du.get_point_cloud_from_z(depth, self.camera_matrix, \
                                                 scale=self.du_scale)
 
@@ -97,7 +97,7 @@ class MapBuilder(object):
 
     def get_door_map(self, depth, current_pose, clear_map=False):
         with np.errstate(invalid="ignore"):
-            depth[depth > self.vision_range * self.resolution] = np.NaN
+            depth[depth > self.vision_range * self.resolution] = np.nan
         point_cloud = du.get_point_cloud_from_z(depth, self.camera_matrix, \
                                                 scale=self.du_scale)
 
@@ -155,7 +155,7 @@ class MapBuilder(object):
 
     def get_door_map_full(self, depth, current_pose, clear_map=False):
         with np.errstate(invalid="ignore"):
-            depth[depth > self.vision_range * self.resolution] = np.NaN
+            depth[depth > self.vision_range * self.resolution] = np.nan
         point_cloud = du.get_point_cloud_from_z(depth, self.camera_matrix, \
                                                 scale=self.du_scale)
 

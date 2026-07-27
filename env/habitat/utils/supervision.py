@@ -17,7 +17,7 @@ class HabitatMaps(object):
             zx, self.padding, self.resolution)
 
         zx = zx - self.origin
-        self.zx = (zx / self.resolution).astype(np.int)
+        self.zx = (zx / self.resolution).astype(np.int64)
 
     def get_map(self, y, lb, ub):
         ids = np.logical_and(self.y > y + lb, self.y < y + ub)
@@ -34,8 +34,8 @@ class HabitatMaps(object):
 
     def _get_xy_bounding_box(self, zx, padding):
         """Returns the xy bounding box of the environment."""
-        min_ = np.floor(np.min(zx, axis=0) - padding).astype(np.int)
-        max_ = np.ceil(np.max(zx, axis=0) + padding).astype(np.int)
+        min_ = np.floor(np.min(zx, axis=0) - padding).astype(np.int64)
+        max_ = np.ceil(np.max(zx, axis=0) + padding).astype(np.int64)
         return min_, max_
 
     def _sample_points(self, env, N):

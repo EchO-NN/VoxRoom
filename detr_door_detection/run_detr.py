@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from time import time
 import os
+from pathlib import Path
 from detr_door_detection.utils import *
 import torch.nn.functional as F
 
@@ -97,7 +98,15 @@ class DetrDoorDetector(nn.Module):
     This class builds a door detector starting from a detr pretrained module.
     Basically it loads a dtr module and modify its structure to recognize door.
     """
-    def __init__(self, model_name: ModelName, n_labels: int, pretrained: bool, dataset_name: DATASET, description: DESCRIPTION):
+    def __init__(
+        self,
+        model_name: ModelName,
+        n_labels: int,
+        pretrained: bool,
+        dataset_name: DATASET,
+        description: DESCRIPTION,
+        detr_source_dir=None,
+    ):
         """
 
         :param model_name: the name of the detr base model
@@ -107,7 +116,23 @@ class DetrDoorDetector(nn.Module):
         """
         super(DetrDoorDetector, self).__init__()
         self._model_name = model_name
-        self.model = torch.hub.load('facebookresearch/detr', model_name, pretrained=True)
+        repo_root = Path(__file__).resolve().parents[1]
+        source_dir = Path(
+            detr_source_dir
+            or os.environ.get("ACTIVE_ROOM_DETR_DIR", repo_root / "third_party" / "detr")
+        ).expanduser().resolve()
+        if not (source_dir / "hubconf.py").is_file():
+            raise FileNotFoundError(
+                "Pinned DETR source is missing: {}. Run scripts/bootstrap_modern.sh first.".format(
+                    source_dir
+                )
+            )
+        self.model = torch.hub.load(
+            str(source_dir),
+            model_name,
+            source="local",
+            pretrained=False,
+        )
         self._dataset_name = dataset_name
         self._description = description
 
@@ -117,7 +142,11 @@ class DetrDoorDetector(nn.Module):
 
         if pretrained:
             path = os.path.join(os.path.dirname(__file__), 'train_params', self._model_name + '_' + str(self._description), str(self._dataset_name))
-            self.model.load_state_dict(torch.load(os.path.join(path, 'model.pth')))
+            weights_path = os.path.join(path, 'model.pth')
+            if not os.path.isfile(weights_path):
+                raise FileNotFoundError("Door detector checkpoint is missing: {}".format(weights_path))
+            state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
+            self.model.load_state_dict(state_dict)
 
     def forward(self, x):
         x = self.model(x)
@@ -136,13 +165,14 @@ class DetrDoorDetector(nn.Module):
         return x
 
     def eval(self):
-        self.model.eval()
+        return self.train(False)
 
-    def train(self):
-        self.model.train()
+    def train(self, mode=True):
+        super().train(mode)
+        return self
 
     def to(self, device):
-        self.model.to(device)
+        return super().to(device)
 
     def save(self, epoch, optimizer_state_dict, lr_scheduler_state_dict, params, logs):
         path = os.path.join(os.path.dirname(__file__), 'train_params', self._model_name + '_' + str(self._description))
@@ -182,33 +212,66 @@ class DetrDoorDetector(nn.Module):
         self._description = description
 
 
-model = DetrDoorDetector(model_name=DETR_RESNET50, n_labels=2, pretrained=True,
-                             dataset_name=FINAL_DOORS_DATASET, description=EXP_2_HOUSE_1_75)
+_model = None
+_model_device = None
 
 
-def run_detr(img):  # 256, 256, 3
+def _resolve_device(device=None):
+    requested = device or os.environ.get("ACTIVE_ROOM_DETECTOR_DEVICE", "cuda")
+    if requested not in {"cpu", "cuda"}:
+        raise ValueError("Door detector device must be either 'cpu' or 'cuda'")
+    resolved = torch.device(requested)
+    if resolved.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA door detection was requested, but CUDA is unavailable")
+    return resolved
+
+
+def get_door_detector(device=None):
+    global _model
+    global _model_device
+
+    resolved_device = _resolve_device(device)
+    if _model is None:
+        _model = DetrDoorDetector(
+            model_name=DETR_RESNET50,
+            n_labels=2,
+            pretrained=True,
+            dataset_name=FINAL_DOORS_DATASET,
+            description=EXP_2_HOUSE_1_75,
+        )
+    if _model_device != resolved_device:
+        _model.to(resolved_device)
+        _model_device = resolved_device
+    _model.eval()
+    return _model, resolved_device
+
+
+def run_detr(img, device=None):  # 256, 256, 3
     global title
+    model, model_device = get_door_detector(device)
     model.eval()
     img_vis = img.copy()
-    #print('detr_received shape {}'.format(img.shape))
-    #img = cv2.resize()
-
-    img_cv2 = np.zeros((img.shape[1], img.shape[1]), np.uint8)
-    img_mask_full = np.zeros((img.shape[1], img.shape[1]), np.uint8)
-    img = img.transpose(2, 0, 1)  # 3, 256, 256
-    #img = img[:-1,:,:]
-    input = torch.zeros([1, 3, img.shape[1], img.shape[1]])
-    img = torch.tensor(img)
-    input[0] = img
-    outputs = [(model(input), title)]
+    image_height, image_width = img.shape[:2]
+    img_cv2 = np.zeros((image_height, image_width), np.uint8)
+    img_mask_full = np.zeros((image_height, image_width), np.uint8)
+    input_tensor = torch.from_numpy(
+        np.ascontiguousarray(img.transpose(2, 0, 1))
+    ).unsqueeze(0).to(device=model_device, dtype=torch.float32)
+    with torch.inference_mode():
+        outputs = [(model(input_tensor), title)]
     # t2 = time()
-    post_processor = PostProcess()
-    img_size = [img.shape[1], img.shape[1]]
-    processed_data_models = [(post_processor(outputs=output, target_sizes=torch.tensor([img_size])), title) for
+    post_processor = PostProcess().to(model_device)
+    img_size = [image_height, image_width]
+    target_sizes = torch.tensor([img_size], device=model_device)
+    processed_data_models = [(post_processor(outputs=output, target_sizes=target_sizes), title) for
                              output, title in outputs]
 
     post_processed_data = processed_data_models[0]
-    image_data, title = post_processed_data[0][0], post_processed_data[1]
+    image_data = {
+        key: value.detach().cpu()
+        for key, value in post_processed_data[0][0].items()
+    }
+    title = post_processed_data[1]
     keep = image_data['scores'] > 0.5
     for label, score, (xmin, ymin, xmax, ymax) in zip(image_data['labels'][keep], image_data['scores'][keep],
                                                       image_data['boxes'][keep]):
@@ -221,7 +284,9 @@ def run_detr(img):  # 256, 256, 3
             break
 
         # label 0 close, label 1 open
-        (xmin, ymin, xmax, ymax) = np.rint(np.array([xmin, ymin, xmax, ymax])).astype('int32')
+        (xmin, ymin, xmax, ymax) = np.rint(
+            np.array([xmin, ymin, xmax, ymax])
+        ).astype('int32')
 
         img_cv2 = cv2.rectangle(img_cv2, (xmin, (ymin+ymax)//2-20), (xmax, (ymin+ymax)//2), #(xmin, (ymin+ymax)//2-20), (xmax, (ymin+ymax)//2),
                                 color=1, thickness=(xmax-xmin)//4)  # 20 (xmax-xmin)//4
@@ -242,7 +307,7 @@ def run_detr(img):  # 256, 256, 3
         font = cv2.FONT_HERSHEY_SIMPLEX
         #img_vis = cv2.putText(img_vis, '{:.3f}'.format(score), (xmin + 10, ymin + 10), font, 0.5, (0, 0, 255), 1)
     img_mask_full = cv2.rectangle(img_mask_full, (0, 0),
-                                  (img.shape[1], img.shape[1]*3//5),
+                                  (image_width, image_height*3//5),
                                   color=1, thickness=-1)
     return img_cv2, img_vis, img_mask_full
 
@@ -255,4 +320,3 @@ if __name__ == '__main__':
     result = run_detr(img)
     plt.imshow(result)
     plt.show()
-

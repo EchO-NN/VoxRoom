@@ -1,0 +1,18 @@
+name: active-room-seg
+channels:
+  - aihabitat
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.9
+  - habitat-sim=0.2.4
+  - numpy=1.26.4
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.7.1+cu128
+      - torchvision==0.22.1+cu128
+      - python-igraph==0.11.9
+      - seaborn==0.13.2
+      - treelib==1.7.1

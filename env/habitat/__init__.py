@@ -7,21 +7,23 @@ from habitat.config.default import get_config as cfg_env
 from habitat.datasets.pointnav.pointnav_dataset import PointNavDatasetV1
 
 from .exploration_env import Exploration_Env
-from .habitat_api.habitat.core.vector_env import VectorEnv
-from .habitat_api.habitat_baselines.config.default import get_config as cfg_baseline
+from .vector_env import VectorEnv
 
 
 
-def make_env_fn(args, config_env, config_baseline, rank):
+def make_env_fn(args, config_env, rank):
     dataset = PointNavDatasetV1(config_env.DATASET)
     config_env.defrost()
     config_env.SIMULATOR.SCENE = dataset.episodes[0].scene_id
     print("Loading {}".format(config_env.SIMULATOR.SCENE))
     config_env.freeze()
 
-    env = Exploration_Env(args=args, rank=rank,
-                          config_env=config_env, config_baseline=config_baseline, dataset=dataset
-                          )
+    env = Exploration_Env(
+        args=args,
+        rank=rank,
+        config_env=config_env,
+        dataset=dataset,
+    )
 
     env.seed(rank)
     return env
@@ -29,7 +31,6 @@ def make_env_fn(args, config_env, config_baseline, rank):
 
 def construct_envs(args):
     env_configs = []
-    baseline_configs = []
     args_list = []
 
     basic_config = cfg_env(config_paths=
@@ -99,19 +100,16 @@ def construct_envs(args):
 
         env_configs.append(config_env)
 
-        config_baseline = cfg_baseline()
-        baseline_configs.append(config_baseline)
-
         args_list.append(args)
 
     envs = VectorEnv(
         make_env_fn=make_env_fn,
         env_fn_args=tuple(
             tuple(
-                zip(args_list, env_configs, baseline_configs,
-                    range(args.num_processes))
+                zip(args_list, env_configs, range(args.num_processes))
             )
         ),
+        auto_reset_done=False,
     )
 
     return envs

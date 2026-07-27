@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.downloads/
+data/
+third_party/
+detr_door_detection/train_params/
+outputs/
+tmp/
+reproduction_install.json

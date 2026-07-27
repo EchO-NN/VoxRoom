@@ -1,5 +1,7 @@
 import argparse
 import math
+import os
+from pathlib import Path
 import torch
 
 
@@ -9,7 +11,7 @@ def get_args():
     ## General Arguments
     parser.add_argument('--seed', type=int, default=1,
                         help='random seed (default: 1)')
-    parser.add_argument('--auto_gpu_config', type=int, default=1)
+    parser.add_argument('--auto_gpu_config', type=int, default=0)
     parser.add_argument('--total_num_scenes', type=str, default="auto")
     parser.add_argument('-n', '--num_processes', type=int, default=1,
                         help="""how many training processes to use (default:4)
@@ -61,6 +63,36 @@ def get_args():
     parser.add_argument('--print_images', type=int, default=0,
                         help='1: save visualization as images')
     parser.add_argument('--save_trajectory_data', type=str, default="0")
+    parser.add_argument(
+        '--run_dir',
+        type=str,
+        default="./tmp/active_room_segmentation",
+        help='directory for the machine-readable run summary',
+    )
+    parser.add_argument(
+        '--detector_device',
+        choices=('cpu', 'cuda'),
+        default='cuda',
+        help='device used by the DETR door detector',
+    )
+    parser.add_argument(
+        '--run_id',
+        type=str,
+        default='',
+        help='unique identifier written into every run artifact',
+    )
+    parser.add_argument(
+        '--window_title',
+        type=str,
+        default='Active Room Segmentation',
+        help='exact title used by the live visualization window',
+    )
+    parser.add_argument(
+        '--detr_source_dir',
+        type=str,
+        default=str(Path(__file__).resolve().parent / "third_party" / "detr"),
+        help='path to the pinned facebookresearch/detr checkout',
+    )
 
     # Environment, dataset and episode specifications
     parser.add_argument('-efw', '--env_frame_width', type=int, default=256,  # 256 this is the resolution of the scene
@@ -166,6 +198,10 @@ def get_args():
     # parse arguments
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
+    args.detr_source_dir = str(Path(args.detr_source_dir).expanduser().resolve())
+    args.run_dir = str(Path(args.run_dir).expanduser().resolve())
+    os.environ["ACTIVE_ROOM_DETR_DIR"] = args.detr_source_dir
+    os.environ["ACTIVE_ROOM_DETECTOR_DEVICE"] = args.detector_device
 
     if args.cuda:
         if args.auto_gpu_config:
@@ -242,7 +278,7 @@ def get_args():
 
     if args.num_mini_batch == "auto":
         print('args.num_process {}'.format(args.num_processes))
-        args.num_mini_batch = args.num_processes // 2
+        args.num_mini_batch = max(1, args.num_processes // 2)
     else:
         args.num_mini_batch = int(args.num_mini_batch)
 

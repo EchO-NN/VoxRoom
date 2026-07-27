@@ -1,6 +1,7 @@
 import math
 import os
 import pickle
+from pathlib import Path
 import sys
 import cv2
 import gym
@@ -23,6 +24,7 @@ import matplotlib.pyplot as plt
 
 import habitat
 from habitat import logger
+from habitat.sims.habitat_simulator.actions import HabitatSimActions
 
 from env.utils.map_builder import MapBuilder
 from env.utils.fmm_planner import FMMPlanner
@@ -43,20 +45,22 @@ def _preprocess_depth(depth):
         depth[:,i][depth[:,i] == 0.] = depth[:,i].max()  #replace the outlier with the max depth
 
     mask1 = depth == 0
-    depth[mask1] = np.NaN
+    depth[mask1] = np.nan
     depth = depth*1000.
     return depth
 
 
 class Exploration_Env(habitat.RLEnv):#RLEnv
 
-    def __init__(self, args, rank, config_env, config_baseline, dataset):
+    def __init__(self, args, rank, config_env, dataset):
         if args.visualize:
             plt.ion()
         if args.print_images or args.visualize:
             self.figure, self.ax = plt.subplots(1,2, figsize=(6*16/9, 6),
                                                 facecolor="whitesmoke",
-                                                num="Thread {}".format(rank))
+                                                num="{} - Habitat".format(
+                                                    args.window_title
+                                                ))
 
         self.args = args
         self.num_actions = 3
@@ -64,16 +68,21 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         self.rank = rank
 
-        self.sensor_noise_fwd = \
-                pickle.load(open("noise_models/sensor_noise_fwd.pkl", 'rb'))
-        self.sensor_noise_right = \
-                pickle.load(open("noise_models/sensor_noise_right.pkl", 'rb'))
-        self.sensor_noise_left = \
-                pickle.load(open("noise_models/sensor_noise_left.pkl", 'rb'))
+        self.sensor_noise_fwd = None
+        self.sensor_noise_right = None
+        self.sensor_noise_left = None
+        if args.noisy_odometry:
+            noise_dir = Path(__file__).resolve().parents[2] / "noise_models"
+            with (noise_dir / "sensor_noise_fwd.pkl").open("rb") as model_file:
+                self.sensor_noise_fwd = pickle.load(model_file)
+            with (noise_dir / "sensor_noise_right.pkl").open("rb") as model_file:
+                self.sensor_noise_right = pickle.load(model_file)
+            with (noise_dir / "sensor_noise_left.pkl").open("rb") as model_file:
+                self.sensor_noise_left = pickle.load(model_file)
 
-        habitat.SimulatorActions.extend_action_space("NOISY_FORWARD")
-        habitat.SimulatorActions.extend_action_space("NOISY_RIGHT")
-        habitat.SimulatorActions.extend_action_space("NOISY_LEFT")
+        HabitatSimActions.extend_action_space("NOISY_FORWARD")
+        HabitatSimActions.extend_action_space("NOISY_RIGHT")
+        HabitatSimActions.extend_action_space("NOISY_LEFT")
 
         config_env.defrost()
         config_env.SIMULATOR.ACTION_SPACE_CONFIG = \
@@ -208,17 +217,17 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             action = 1
             self.scan_flag *= 0
             clear_flag = True
-            noisy_action = habitat.SimulatorActions.NOISY_FORWARD
+            noisy_action = HabitatSimActions.NOISY_FORWARD
         elif action == 1: # Right, and we make right to be the scan direction
             action = 3
             self.scan_flag += 1
             clear_flag = False
-            noisy_action = habitat.SimulatorActions.NOISY_RIGHT
+            noisy_action = HabitatSimActions.NOISY_RIGHT
         elif action == 0: # Left
             action = 2
             self.scan_flag *= 0
             clear_flag = True
-            noisy_action = habitat.SimulatorActions.NOISY_LEFT
+            noisy_action = HabitatSimActions.NOISY_LEFT
 
         self.last_loc = np.copy(self.curr_loc)
         self.last_loc_gt = np.copy(self.curr_loc_gt)
@@ -236,7 +245,10 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             rgb = np.asarray(self.res(rgb))
         #door_frame_mask = hough_detection(self.obs)
 
-        door_frame_mask, vis_result, door_frame_mask_full = run_detr(self.obs/255)#run_detr(self.obs/255)
+        door_frame_mask, vis_result, door_frame_mask_full = run_detr(
+            self.obs / 255,
+            device=self.args.detector_device,
+        )
 
         state = rgb.transpose(2, 0, 1)
 
@@ -248,8 +260,12 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         # Get base sensor and ground-truth pose
         dx_gt, dy_gt, do_gt = self.get_gt_pose_change()
-        dx_base, dy_base, do_base = self.get_base_pose_change(
-                                        action, (dx_gt, dy_gt, do_gt))
+        if args.noisy_odometry:
+            dx_base, dy_base, do_base = self.get_base_pose_change(
+                action, (dx_gt, dy_gt, do_gt)
+            )
+        else:
+            dx_base, dy_base, do_base = dx_gt, dy_gt, do_gt
 
         self.curr_loc = pu.get_new_pose(self.curr_loc,
                                (dx_base, dy_base, do_base))
@@ -260,7 +276,6 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         if not args.noisy_odometry:
             self.curr_loc = self.curr_loc_gt
-            dx_base, dy_base, do_base = dx_gt, dy_gt, do_gt
 
         # Convert pose to cm and degrees for mapper
         mapper_gt_pose = (self.curr_loc_gt[0]*100.0,
