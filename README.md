@@ -1,6 +1,10 @@
 # Active room segmentation
 ![image](https://github.com/FreeformRobotics/Active_room_segmentation/blob/master/demo/Swormville_demo.gif)
 
+For the pinned RTX 5090 reproduction, complete live topology dashboard, MP3D
+asset preparation, strict validation, and replay workflow, see
+[VISUAL_REPRODUCTION_ZH.md](VISUAL_REPRODUCTION_ZH.md).
+
 This is the Code for the paper 'Human Cognition-Inspired Active Room Segmentation'. Inspired by the human cognition system, this method incorporates vision input as an additional feature and follows a room-by-room exploration strategy to facilitate both the room exploration and exploration tasks. For full details refer to [the paper](https://ieeexplore.ieee.org/abstract/document/11127294).
 
 # Dependencies
@@ -30,4 +34,3 @@ For running the active room segmentation method:
 ```
 python explorable_with_door_detection.py --split val --eval 1 -n 1 -v 1 --train_global 0 --train_local 0 --train_slam 0 
 ```
-

@@ -33,6 +33,7 @@ from topomap_construction import Topomap_construction
 from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
 from time import time
+from visualization import RuntimeDashboard, TopologyEventRecorder
 
 def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
     loc_r, loc_c = agent_loc
@@ -200,10 +201,46 @@ def main():
             "detr_source_dir": args.detr_source_dir,
             "visualization": bool(args.visualize),
             "window_title": args.window_title,
+            "visualization_frame_every_steps": int(
+                args.visualization_frame_every_steps
+            ),
+            "require_topology_transition": bool(args.require_topology_transition),
         },
     )
 
+    event_recorder = TopologyEventRecorder(
+        run_dir / "topology_events.jsonl",
+        args.run_id,
+        os.getpid(),
+    )
+    topology_provider = {"snapshot": None}
+    runtime_state = {
+        "phase": "initializing",
+        "action": "none",
+        "topology_exploration_complete_step": None,
+    }
+
+    def record_event(event_type, **payload):
+        return event_recorder.record(
+            event_type,
+            action_count,
+            **payload,
+        )
+
+    def set_runtime_phase(phase, action="none"):
+        runtime_state["phase"] = str(phase)
+        runtime_state["action"] = str(action)
+
     def append_progress(step, info):
+        topology_snapshot = (
+            topology_provider["snapshot"]()
+            if topology_provider["snapshot"] is not None
+            else {
+                "current_node_id": 0,
+                "room_count": 1,
+                "edge_count": 0,
+            }
+        )
         event = {
             "run_id": args.run_id,
             "process_id": os.getpid(),
@@ -212,6 +249,13 @@ def main():
             "scene_name": str(info.get("scene_name", "")),
             "explored_ratio": float(info.get("exp_ratio") or 0.0),
             "explored_reward": float(info.get("exp_reward") or 0.0),
+            "phase": runtime_state["phase"],
+            "action": runtime_state["action"],
+            "topology_current_node_id": int(
+                topology_snapshot.get("current_node_id", 0)
+            ),
+            "topology_room_count": int(topology_snapshot.get("room_count", 0)),
+            "topology_edge_count": int(topology_snapshot.get("edge_count", 0)),
             "timestamp_unix": time(),
         }
         with progress_path.open("a", encoding="utf-8") as progress_file:
@@ -220,10 +264,6 @@ def main():
             os.fsync(progress_file.fileno())
 
     live_figure = None
-
-    def activate_live_figure():
-        if live_figure is not None:
-            plt.figure(live_figure.number)
 
     # Logging and loss variables
     num_scenes = args.num_processes
@@ -263,8 +303,15 @@ def main():
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
     obs, infos = envs.reset()
+    dashboard = None
     if args.visualize or args.print_images:
-        live_figure = plt.figure(num=args.window_title, figsize=(14, 7))
+        live_figure = plt.figure(num=args.window_title, figsize=(16, 9))
+        dashboard = RuntimeDashboard(
+            live_figure,
+            run_dir,
+            frame_every_steps=args.visualization_frame_every_steps,
+            refresh_seconds=args.visualization_refresh_seconds,
+        )
 
     # Initialize map variables
     ### Full map consists of 4 channels containing the following:
@@ -279,8 +326,19 @@ def main():
 
         # print('pp_list {}'.format(prior_door_list))
         # print('start_next_scene')
-        frontier_detector = Frontier_detection(args.map_size_cm // args.map_resolution)
-        topo = Topomap_construction()
+        frontier_detector = Frontier_detection(
+            args.map_size_cm // args.map_resolution,
+            vision_range=args.vision_range,
+        )
+        topo = Topomap_construction(
+            map_size=args.map_size_cm // args.map_resolution,
+            vision_range=args.vision_range,
+            event_callback=lambda event_type, payload: record_event(
+                event_type,
+                **payload,
+            ),
+        )
+        topology_provider["snapshot"] = topo.snapshot
         if established_graph:
             topo.use_exist_topomap(established_graph)
         # Calculating full and local map sizes
@@ -340,6 +398,49 @@ def main():
         keep_exploring = True
         locs = np.array([args.map_size_cm / 100.0 / 4.0, args.map_size_cm / 100.0 / 4.0, 0])  # origins[0] [y,x,o]
         panoramic_obstacle_map = torch.zeros(num_scenes, 4, full_w, full_h).float().to(device)
+        trajectory_xy = deque(maxlen=args.max_episode_length + 1)
+
+        def render_dashboard(info, absolute_locs, goal_xy=None, frontiers=None):
+            if dashboard is None:
+                return
+            agent_xy = (
+                float(absolute_locs[1] * 100.0 / args.map_resolution),
+                float(absolute_locs[0] * 100.0 / args.map_resolution),
+            )
+            if not trajectory_xy or np.linalg.norm(
+                np.asarray(agent_xy) - np.asarray(trajectory_xy[-1])
+            ) > 0.05:
+                trajectory_xy.append(agent_xy)
+            occupied = np.asarray(info["gt_map"]).transpose()
+            explored = np.asarray(info["gt_exp"]).transpose()
+            explored_ratio = float(info.get("exp_ratio") or 0.0)
+            explored_area = float(info.get("exp_reward") or 0.0) * 50.0
+            dashboard.render(
+                step=action_count,
+                rgb=info["door_detection"],
+                occupied=occupied,
+                explored=explored,
+                agent_xy=agent_xy,
+                heading_degrees=float(absolute_locs[2]),
+                goal_xy=goal_xy,
+                doors=detected_door_list,
+                raw_doors=raw_detect_list,
+                frontiers=frontiers or [],
+                trajectory_xy=list(trajectory_xy),
+                topology_snapshot=topo.snapshot(),
+                coverage_history=list(cov_ratio_list),
+                explored_ratio=explored_ratio,
+                explored_area=explored_area,
+                status={
+                    "phase": runtime_state["phase"],
+                    "action": runtime_state["action"],
+                    "scene_name": scene_name,
+                    "door_count": len(detected_door_list),
+                    "raw_door_count": len(raw_detect_list),
+                    "frontier_count": len(frontiers or []),
+                },
+                events=event_recorder.latest_events(),
+            )
 
         def generate_12_parts(agent_pose):
             x = agent_pose[1]  # x and y unit is m and presented in local frame
@@ -376,6 +477,15 @@ def main():
             global last_episode_cov_ratio
             global last_episode_cov_area
 
+            if action == 4:
+                runtime_state["action"] = "scan_turn_right"
+            else:
+                runtime_state["action"] = {
+                    0: "turn_left",
+                    1: "turn_right",
+                    2: "forward",
+                }.get(int(action), "unknown")
+
             """if action != 4:
                 action_count += 1
             else:
@@ -391,36 +501,18 @@ def main():
 
                     take_name_flag = False
                 completed_step = action_count + 1
+                action_count = completed_step
                 append_progress(completed_step, infos[0])
                 if bool(np.asarray(done).reshape(-1)[0]):  # means this round should be over
                     last_episode_action_count = completed_step
                     last_episode_cov_ratio = float(infos[0]["exp_ratio"])
                     last_episode_cov_area = float(infos[0]["exp_reward"]) * 50.0
-                    
-                    
-                    
-                    activate_live_figure()
-                    plt.ion()
-                    plt.clf()
-                    plt.plot(cov_ratio_list)
-                    plt.show()
-                    plt.pause(2)
-                    plt.ioff()
-                    plt.close()
-                    
-                    action_count = 0
-                    cov_ratio = 0
-                    cov_area = 0
-                    log_num = 0
-                    last_goal = None
-                    cov_ratio_list.clear()
-                    cov_area_list.clear()
-                    step_list.clear()
-                    detected_door_list.clear()
-                    raw_detect_list.clear()
-                    bot_last_loc.clear()
+                    record_event(
+                        "episode_done",
+                        simulator_step=int(infos[0]["time"]),
+                        explored_ratio=last_episode_cov_ratio,
+                    )
                     return np.array([None]), np.array([None]), np.array([None]), False
-                action_count = completed_step
                 # print(infos[0]['sensor_pose'])
                 # print(locs)
                 # locs = locs + infos[0]['sensor_pose']
@@ -564,43 +656,11 @@ def main():
                 # stg_x = stg_x + origins[0][1]*100/args.map_resolution
                 # stg_y = stg_y + origins[0][0]*100/args.map_resolution
                 stg = [stg_x * args.map_resolution / 100, stg_y * args.map_resolution / 100]
-                activate_live_figure()
-                plt.ion()
-
-                plt.clf()
-                plt.cla()
-                plt.subplot(1, 2, 1)
-                plt.imshow(gt_map + gt_exp)
-                plt.arrow(absolute_locs[1] * 100 / 5, absolute_locs[0] * 100 / 5, dx * 8, dy * (8 * 1.25), head_width=8,
-                          head_length=8 * 1.25,
-                          length_includes_head=True, fc='Red', ec='Red',
-                          alpha=0.9)  # absolute_locs[1]*100/5, absolute_locs[0]*100/5
-                # plt.plot(origins[0][0]*100/5,origins[0][1]*100/5,'o',color='red')
-                plt.plot(lmb[0][0], lmb[0][2], 'o', color='red')
-                plt.plot(lmb[0][1], lmb[0][2], 'o', color='red')
-                plt.plot(lmb[0][0], lmb[0][3], 'o', color='red')
-                plt.plot(lmb[0][1], lmb[0][3], 'o', color='red')
-
-                plt.plot(global_goal[1], global_goal[0], 'o', color='lime')
-
-                for door in detected_door_list:
-                    plt.plot([door['start'][0], door['end'][0]], [door['start'][1], door['end'][1]], color='fuchsia')
-                    # plt.plot(door[0], door[1], 'o', color='pink')
-                for door in raw_detect_list:
-                    plt.plot(door[0], door[1], 'o', color='pink')
-
-                # for goal in goal_list:
-                #    plt.plot(goal[0]+origins[0][1]*100/5,goal[1]+origins[0][0]*100/5,'o',color='yellow')
-                """for i in path_list:
-                    plt.plot(i[0], i[1], 'o', color = 'plum')"""
-                #plt.plot((stg[0] + origins[0][1]) * 100 / 5, (stg[1] + origins[0][0]) * 100 / 5, 'o', color='aqua')
-
-                #plt.savefig('hough_result.png')
-                plt.subplot(1, 2, 2)
-                plt.imshow(obs_show)  # , cmap='gray'
-                # plt.show()
-                plt.pause(0.1)
-                plt.ioff()
+                render_dashboard(
+                    infos[0],
+                    absolute_locs,
+                    goal_xy=(float(global_goal[1]), float(global_goal[0])),
+                )
 
                 return locs, stg, goal, False
             else:
@@ -626,28 +686,11 @@ def main():
                         last_episode_action_count = action_count
                         last_episode_cov_ratio = float(cov_ratio_list[-1]) if cov_ratio_list else 0.0
                         last_episode_cov_area = float(cov_area_list[-1]) if cov_area_list else 0.0
-
-                        
-                        activate_live_figure()
-                        plt.ion()
-                        plt.clf()
-                        plt.plot(cov_ratio_list)
-                        plt.show()
-                        plt.pause(2)
-                        plt.ioff()
-                        plt.close()
-                        
-                        action_count = 0
-                        cov_ratio = 0
-                        cov_area = 0
-                        log_num = 0
-                        last_goal = None
-                        cov_ratio_list.clear()
-                        cov_area_list.clear()
-                        step_list.clear()
-                        detected_door_list.clear()
-                        raw_detect_list.clear()
-                        bot_last_loc.clear()
+                        record_event(
+                            "episode_done",
+                            simulator_step=int(infos[0]["time"]),
+                            explored_ratio=last_episode_cov_ratio,
+                        )
                         return np.array([None]), np.array([None]), np.array([None]), False
                     # print(infos[0]['sensor_pose'])
                     # print(locs)
@@ -686,14 +729,7 @@ def main():
                     #np.save('paper_fig/{}.npy'.format(turn_num), obs[0].cpu().detach().numpy().astype(np.uint8).transpose(1, 2, 0))
                     #np.save('paper_fig/depth{}.npy'.format(turn_num),
                     #        depth_image)
-                    activate_live_figure()
-                    plt.ion()
-                    plt.clf()
-                    plt.cla()
-                    plt.imshow(obs_show)  # , cmap='gray'
-                    #plt.show()
-                    plt.pause(0.1)
-                    plt.ioff()
+                    render_dashboard(infos[0], absolute_locs)
                     # plt.imsave('pic_save/{}.png'.format(action_count), obs_show)
                 # print('origin {}'.format(origins[0]))
                 # print('absolute_locs {}'.format(absolute_locs))
@@ -963,16 +999,6 @@ def main():
                 print("return_flag {}".format(return_flag))
                 if not return_flag:
                     log_num += 1
-                    plt.clf()
-                    
-                    plt.imshow(show_map)
-                    plt.plot(absolute_locs[1]*100/5, absolute_locs[0]*100/5, 'o', color = 'red')
-                    for f in f_list:
-                        plt.plot(f[1], f[0], 'o', color = 'peru')
-                    
-
-
-
                     final_goal = None
                     shortest_dist = 10000000
 
@@ -1038,6 +1064,10 @@ def main():
                 if final_goal:
                     # print('the chosen frontier is {}[y,x]'.format(final_goal))
                     final_goal.reverse()  # [x, y]
+                    dashboard_goal_xy = (
+                        float(final_goal[0] + origins[0][1] * 100 / args.map_resolution),
+                        float(final_goal[1] + origins[0][0] * 100 / args.map_resolution),
+                    )
                     # print('final_goal{}'.format(final_goal))
                     planner_inputs_frontier = [{} for e in range(num_scenes)]
                     for e, p_input in enumerate(planner_inputs_frontier):
@@ -1094,6 +1124,13 @@ def main():
                     plt.show()"""
                 else:
                     stg = None
+                    dashboard_goal_xy = None
+                render_dashboard(
+                    infos[0],
+                    absolute_locs,
+                    goal_xy=dashboard_goal_xy,
+                    frontiers=f_list,
+                )
             return locs, stg, final_goal, return_flag
 
         def go2goal(locs, stg, long_term_goal, first_flag, achieve_criterion=10, consider_door = False):
@@ -1141,6 +1178,7 @@ def main():
 
                 while room_search_flag:  # this is the room searching part
                     while not achieve_flag:
+                        set_runtime_phase("room_search_navigation")
                         if not whether_returning:
                             locs, stg, long_term_goal, achieve_flag = go2goal(locs, stg, long_term_goal, first_flag, consider_door=True)
                         else:
@@ -1152,13 +1190,22 @@ def main():
                         # dist = pu.get_l2_distance(120, long_term_goal[0], 120, long_term_goal[1])
                         if step_count > step_limit:
                             print('failed to achieve')
+                            record_event(
+                                "room_search_goal_failed",
+                                long_term_goal=long_term_goal,
+                            )
                             step_count = 0
                             break
                         if achieve_flag:
                             print('achieved')
+                            record_event(
+                                "room_search_goal_reached",
+                                long_term_goal=long_term_goal,
+                            )
                             step_count = 0
 
                     achieve_flag = False
+                    set_runtime_phase("room_frontier_scan")
                     locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)
                     if not locs.any():
                         return locs, stg, long_term_goal
@@ -1166,16 +1213,22 @@ def main():
                     if not long_term_goal:
                         room_search_flag = False
                         print('room search done')
+                        record_event(
+                            "room_search_completed",
+                            current_node_id=topo.current_node_id,
+                        )
             return locs, stg, long_term_goal
 
         def room_moving(locs, stg, long_term_goal, first_flag):
             achieve_flag = False
+            set_runtime_phase("topology_exit_selection")
             exit_goal_list = topo.choose_door([(locs[0] + origins[0][0]) * 100 / args.map_resolution,
                                                (locs[1] + origins[0][1]) * 100 / args.map_resolution])
             # return_list = generate_return_list(visited_waypoint, exit_goal)
             print('exit_goal {}'.format(exit_goal_list))
             return_step = 0
             return_threshold = 100#60
+            reached_exit_count = 0
             for exit_goal in exit_goal_list:
                 # for return_waypoint in return_list[1:]:
                 long_term_goal = [exit_goal[0] - origins[0][1] * 100 / args.map_resolution,
@@ -1183,10 +1236,11 @@ def main():
                 # print(long_term_goal)
                 stg = [long_term_goal[0] * 5 / 100, long_term_goal[1] * 5 / 100]
                 while not achieve_flag:
+                    set_runtime_phase("room_transition_navigation")
                     locs, stg, long_term_goal, achieve_flag = go2goal(locs, stg, long_term_goal, first_flag,
                                                                       achieve_criterion=5)  # default is 5
                     if not locs.any():
-                        return locs, stg, long_term_goal
+                        return locs, stg, long_term_goal, len(exit_goal_list), reached_exit_count
                     return_step += 1
                     # dist = pu.get_l2_distance(120, long_term_goal[0], 120, long_term_goal[1])
                     if return_step > return_threshold:
@@ -1195,9 +1249,14 @@ def main():
                         break
                     if achieve_flag:
                         print('achieved')
+                        reached_exit_count += 1
+                        record_event(
+                            "topology_exit_waypoint_reached",
+                            exit_goal=exit_goal,
+                        )
                         return_step = 0
                 achieve_flag = False
-            return locs, stg, long_term_goal
+            return locs, stg, long_term_goal, len(exit_goal_list), reached_exit_count
 
         def exploration(locs):
             global t_start
@@ -1208,6 +1267,8 @@ def main():
 
             first_flag = True  # to check whether it is the first scan
             # take the initialization step, first we scan the surrounding
+            set_runtime_phase("initial_scan")
+            record_event("exploration_started")
             locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)  # long term goal is under local frame
 
             if not locs.any():
@@ -1222,25 +1283,113 @@ def main():
                 if not locs.any():
                     return None
                 # here is the room to room moving part
-                locs, stg, long_term_goal = room_moving(locs, stg, long_term_goal, first_flag)
+                locs, stg, long_term_goal, exit_goal_count, reached_exit_count = room_moving(
+                    locs,
+                    stg,
+                    long_term_goal,
+                    first_flag,
+                )
                 if not locs.any():
                     return None
+                set_runtime_phase("transition_confirmation_scan")
                 locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)
                 if not locs.any():
                     return None
-                # after achieve new room, scan for new info, maybe it has already been scanned
-                print('moved to another room')
+                if exit_goal_count > 0 and whether_returning:
+                    print('room transition confirmed')
+                    record_event(
+                        "room_transition_confirmed",
+                        exit_goal_count=exit_goal_count,
+                        reached_exit_count=reached_exit_count,
+                        current_node_id=topo.current_node_id,
+                    )
+                elif exit_goal_count > 0:
+                    print('room transition not confirmed')
+                    record_event(
+                        "room_transition_not_confirmed",
+                        exit_goal_count=exit_goal_count,
+                        reached_exit_count=reached_exit_count,
+                        current_node_id=topo.current_node_id,
+                    )
+                else:
+                    print('no room transition: topology has no exit goal')
+                    record_event(
+                        "room_transition_skipped_no_exit",
+                        current_node_id=topo.current_node_id,
+                    )
             t_end = time()
             print('time cost {}'.format(t_end-t_start))
+            runtime_state["topology_exploration_complete_step"] = action_count
+            set_runtime_phase("topology_complete")
+            record_event(
+                "topology_exploration_completed",
+                topology=topo.snapshot(),
+                elapsed_seconds=t_end - t_start,
+            )
+            set_runtime_phase("episode_tail")
             while action_count < args.max_episode_length-1:
                 locs, stg, long_term_goal, _ = take_action(0, locs, first_flag, [args.map_size_cm / 20, args.map_size_cm / 20])
 
             locs, stg, long_term_goal, _ = take_action(0, locs, False, [args.map_size_cm / 20, args.map_size_cm / 20])
             # take one more step to activate the new map
             #print('action_in total {}'.format(action_count))
+            set_runtime_phase("completed")
+            record_event("episode_control_completed", executed_steps=action_count)
 
         exploration(locs)
 
+        topology_snapshot = topo.snapshot()
+        record_event(
+            "run_completed",
+            executed_steps=int(last_episode_action_count or action_count),
+            topology=topology_snapshot,
+        )
+        event_summary = event_recorder.summary()
+        topology_transition_count = int(
+            event_summary["event_counts"].get("room_transition_confirmed", 0)
+        )
+        door_crossing_count = int(
+            event_summary["event_counts"].get("door_crossing_confirmed", 0)
+        )
+        if topology_transition_count > 0 and door_crossing_count > 0:
+            topology_status = "cross_room_verified"
+        elif topology_snapshot["edge_count"] > 0:
+            topology_status = "topology_built_no_confirmed_crossing"
+        else:
+            topology_status = "single_room_no_exit"
+        topology_artifact = {
+            "run_id": args.run_id,
+            "process_id": os.getpid(),
+            "source_commit": source_commit,
+            "status": topology_status,
+            "transition_count": topology_transition_count,
+            "door_crossing_count": door_crossing_count,
+            "require_topology_transition": bool(args.require_topology_transition),
+            "requirement_met": (
+                not bool(args.require_topology_transition)
+                or (
+                    topology_transition_count > 0
+                    and door_crossing_count > 0
+                )
+            ),
+            "topology_exploration_complete_step": runtime_state[
+                "topology_exploration_complete_step"
+            ],
+            "snapshot": topology_snapshot,
+            "events": event_summary,
+        }
+        write_json_atomic(run_dir / "topology_final.json", topology_artifact)
+        visualization_manifest = (
+            dashboard.finalize(topology_snapshot, event_summary)
+            if dashboard is not None
+            else {"frame_count": 0}
+        )
+        executed_steps = int(last_episode_action_count or action_count)
+        topology_complete_step = (
+            runtime_state["topology_exploration_complete_step"]
+            if runtime_state["topology_exploration_complete_step"] is not None
+            else executed_steps
+        )
         summary = {
             "status": "completed",
             "run_id": args.run_id,
@@ -1250,7 +1399,7 @@ def main():
             "scene_name": scene_name,
             "requested_max_episode_steps": int(args.max_episode_length),
             "source_commit": source_commit,
-            "executed_steps": int(last_episode_action_count or action_count),
+            "executed_steps": executed_steps,
             "explored_ratio": float(last_episode_cov_ratio or cov_ratio),
             "explored_area": float(last_episode_cov_area or cov_area),
             "visualization": bool(args.visualize),
@@ -1258,6 +1407,21 @@ def main():
             "detector_device": args.detector_device,
             "detr_source_dir": args.detr_source_dir,
             "progress_file": progress_path.name,
+            "topology_file": "topology_final.json",
+            "topology_event_file": event_recorder.path.name,
+            "topology_status": topology_status,
+            "topology_room_count": topology_snapshot["room_count"],
+            "topology_edge_count": topology_snapshot["edge_count"],
+            "topology_transition_count": topology_transition_count,
+            "door_crossing_count": door_crossing_count,
+            "topology_requirement_met": topology_artifact["requirement_met"],
+            "topology_exploration_steps": int(topology_complete_step),
+            "episode_tail_steps": int(max(0, executed_steps - topology_complete_step)),
+            "visualization_manifest": "visualization_manifest.json",
+            "visualization_frame_count": int(
+                visualization_manifest.get("frame_count", 0)
+            ),
+            "visualization_final": visualization_manifest.get("final_image"),
         }
         write_json_atomic(run_dir / "result.json", summary)
         envs.close()

@@ -62,6 +62,25 @@ def get_args():
                         help='1: Show predicted map, 2: Show GT map')
     parser.add_argument('--print_images', type=int, default=0,
                         help='1: save visualization as images')
+    parser.add_argument(
+        '--visualization_frame_every_steps',
+        type=int,
+        default=10,
+        help='save one complete dashboard frame every N control steps',
+    )
+    parser.add_argument(
+        '--visualization_refresh_seconds',
+        type=float,
+        default=0.01,
+        help='GUI event-loop pause after each dashboard refresh',
+    )
+    parser.add_argument(
+        '--require_topology_transition',
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help='fail the run unless a door crossing is confirmed',
+    )
     parser.add_argument('--save_trajectory_data', type=str, default="0")
     parser.add_argument(
         '--run_dir',

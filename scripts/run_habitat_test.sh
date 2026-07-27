@@ -10,6 +10,11 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)_${RUN_ID:0:8}}"
 RUN_DIR="${RUN_DIR:-$ROOT_DIR/outputs/habitat_test_$RUN_TAG}"
 DETR_DIR="$ROOT_DIR/third_party/detr"
 WINDOW_TITLE="Active Room Segmentation [$RUN_ID]"
+TASK_CONFIG="${TASK_CONFIG:-tasks/pointnav_habitat_test.yaml}"
+SPLIT="${SPLIT:-train}"
+REQUIRE_TOPOLOGY_TRANSITION="${REQUIRE_TOPOLOGY_TRANSITION:-0}"
+VISUALIZATION_FRAME_EVERY_STEPS="${VISUALIZATION_FRAME_EVERY_STEPS:-5}"
+VISUALIZATION_REFRESH_SECONDS="${VISUALIZATION_REFRESH_SECONDS:-0.01}"
 STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-900}"
 STALL_TIMEOUT_SECONDS="${STALL_TIMEOUT_SECONDS:-300}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-$((MAX_EPISODE_STEPS * 30 + 900))}"
@@ -24,6 +29,11 @@ if [[ -e "$RUN_DIR" ]]; then
 fi
 if [[ "${ACTIVE_ROOM_DETECTOR_DEVICE:-cuda}" != "cuda" ]]; then
     echo "The verified run requires ACTIVE_ROOM_DETECTOR_DEVICE=cuda" >&2
+    exit 1
+fi
+if [[ "$REQUIRE_TOPOLOGY_TRANSITION" != "0" \
+    && "$REQUIRE_TOPOLOGY_TRANSITION" != "1" ]]; then
+    echo "REQUIRE_TOPOLOGY_TRANSITION must be 0 or 1" >&2
     exit 1
 fi
 
@@ -75,8 +85,8 @@ DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xwininfo -root >/dev/null
 mkdir -p "$RUN_DIR"
 command=(
     "$PYTHON" -u "$ROOT_DIR/explorable_with_door_detection.py"
-    --task_config tasks/pointnav_habitat_test.yaml
-    --split train
+    --task_config "$TASK_CONFIG"
+    --split "$SPLIT"
     --eval 1
     --num_episodes 1
     --max_episode_length "$MAX_EPISODE_STEPS"
@@ -89,6 +99,9 @@ command=(
     --train_slam 0
     --visualize 1
     --print_images 0
+    --visualization_frame_every_steps "$VISUALIZATION_FRAME_EVERY_STEPS"
+    --visualization_refresh_seconds "$VISUALIZATION_REFRESH_SECONDS"
+    --require_topology_transition "$REQUIRE_TOPOLOGY_TRANSITION"
     --detector_device cuda
     --detr_source_dir "$DETR_DIR"
     --run_id "$RUN_ID"
@@ -219,10 +232,19 @@ if [[ "$run_status" -ne 0 ]]; then
     exit "$run_status"
 fi
 
-"$PYTHON" "$ROOT_DIR/scripts/validate_run.py" \
+"$PYTHON" "$ROOT_DIR/scripts/render_replay.py" \
+    --run-dir "$RUN_DIR"
+
+validation_args=(
+    "$PYTHON" "$ROOT_DIR/scripts/validate_run.py"
     --run-dir "$RUN_DIR" \
     --expected-steps "$MAX_EPISODE_STEPS" \
     --run-id "$RUN_ID"
+)
+if [[ "$REQUIRE_TOPOLOGY_TRANSITION" == "1" ]]; then
+    validation_args+=(--require-topology-transition)
+fi
+"${validation_args[@]}"
 
 trap - EXIT
 echo "$RUN_DIR"

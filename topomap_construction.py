@@ -1,13 +1,10 @@
 import numpy as np
 import igraph as ig
-from matplotlib import pyplot as plt
 from frontier_detection import Frontier_detection
-from arguments import get_args
 import cv2
-args = get_args()
 
 class Topomap_construction():
-    def __init__(self):
+    def __init__(self, map_size=960, vision_range=60, event_callback=None):
         #self.vertice = []
         self.g = ig.Graph(n=1, directed=True)  # the robot initial position is one room node
         self.current_node_id = 0
@@ -20,8 +17,61 @@ class Topomap_construction():
         # record whether a room is explored, have three status: exploring, explored, unexplored
         self.in_room_point = None
         self.use_topo = False
-        self.frontier_detector = Frontier_detection(args.map_size_cm // args.map_resolution)
+        self.frontier_detector = Frontier_detection(
+            int(map_size),
+            vision_range=vision_range,
+        )
         self.bot_near_range = 30
+        self.event_callback = event_callback
+        self._emit("topology_initialized", snapshot=self.snapshot())
+
+    @staticmethod
+    def _plain(value):
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(key): Topomap_construction._plain(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Topomap_construction._plain(item) for item in value]
+        return value
+
+    def _emit(self, event_type, **payload):
+        if self.event_callback is not None:
+            self.event_callback(str(event_type), self._plain(payload))
+
+    def snapshot(self):
+        nodes = []
+        for node_id in range(self.g.vcount()):
+            entries = self.g.vs[node_id]["room_entry"] or []
+            explored_cells = self.g.vs[node_id]["room_exp"] or []
+            nodes.append(
+                {
+                    "id": node_id,
+                    "room_status": self.g.vs[node_id]["room_status"],
+                    "room_entries": self._plain(entries),
+                    "room_entry_count": len(entries),
+                    "room_explored_cell_count": len(explored_cells),
+                }
+            )
+        edges = []
+        for edge_id, (source, target) in enumerate(self.g.get_edgelist()):
+            edges.append(
+                {
+                    "id": edge_id,
+                    "source": source,
+                    "target": target,
+                    "way_point": self._plain(self.g.es[edge_id]["way_point"]),
+                }
+            )
+        return {
+            "current_node_id": int(self.current_node_id),
+            "room_count": self.g.vcount(),
+            "edge_count": self.g.ecount(),
+            "nodes": nodes,
+            "edges": edges,
+        }
 
     def same_node_check(self, room_exp_list, detected_door_list): # map will be deleted soon
         target_node_idx_list = []
@@ -84,8 +134,15 @@ class Topomap_construction():
                     detected_door_list.remove(door_remove)
                     print('door {} removed for not enclose after steps of exp'.format(door_remove))
                 # finally we remove the target node
+                merged_node_ids = list(target_node_idx_list)
                 self.g.delete_vertices(target_node_idx_list)
                 self.update_topo(room_exp_list)
+                self._emit(
+                    "topology_rooms_merged",
+                    merged_node_ids=merged_node_ids,
+                    current_node_id=self.current_node_id,
+                    snapshot=self.snapshot(),
+                )
         return detected_door_list
 
     def update_topo(self, room_exp_list):
@@ -167,6 +224,11 @@ class Topomap_construction():
         else:
             out_of_current = True
             print('bot out of room!!!')
+            self._emit(
+                "agent_outside_current_room",
+                current_node_id=self.current_node_id,
+                bot_location=bot_loc,
+            )
         try:
             room_entry = self.g.vs[self.current_node_id]['room_entry'][0].copy()
             room_entry.reverse()
@@ -211,6 +273,13 @@ class Topomap_construction():
                     door['cross_flag'] = True
                     break  # we assume bot can only cross one door at a time
         if not demo:
+            self._emit(
+                "topology_observation_checked",
+                current_node_id=self.current_node_id,
+                candidate_door_count=len(door_list),
+                removed_door_count=len(door_remove_list),
+                out_of_current=out_of_current,
+            )
             return door_list, door_remove_list
         else:
             return door_list, door_remove_list, tmp_show_map
@@ -220,6 +289,8 @@ class Topomap_construction():
 
     def add_room(self, door_list, current_location, gt_map, gt_exp, lmb):  # current_location is [x, y], unit is pix
         #print('add room door list {}'.format(door_list))
+        room_count_before = self.g.vcount()
+        edge_count_before = self.g.ecount()
         bot_mask = np.zeros((gt_exp.shape[0], gt_exp.shape[1]), np.uint8)
         bot_mask = cv2.circle(bot_mask, (round(current_location[0]), round(current_location[1])), self.bot_near_range, 1, -1)
         gt_exp_waypoint = gt_exp.copy()
@@ -237,6 +308,11 @@ class Topomap_construction():
         if cross_flag_exist:
             door_list.remove(crossed_door)
             door_list.insert(0, crossed_door)
+            self._emit(
+                "door_crossing_observed",
+                current_node_id=self.current_node_id,
+                door=crossed_door,
+            )
 
         if not self.use_topo:
             return_flag = False
@@ -338,16 +414,21 @@ class Topomap_construction():
             cross_flag_exist = False
         self.current_node_id = tmp_current_node_idx_store
         self.v_num = self.g.vcount()
-        #layout = self.g.layout('kk')
-        plt.ion()
-        fig, ax = plt.subplots()
-        ig.plot(self.g, target=ax,
-                vertex_label=['{}, {}, {}'.format(i, room_status, self.g.vs[i]['room_entry']) for i, room_status in enumerate(self.g.vs['room_status'])]
-                ,edge_label=['{}, {}'.format(way_point,i) for i, way_point in enumerate(self.g.es['way_point'])])
-        plt.show()
-        plt.pause(2)
-        plt.ioff()
-    #plt.close()
+        if self.g.vcount() != room_count_before or self.g.ecount() != edge_count_before:
+            self._emit(
+                "topology_graph_updated",
+                added_room_ids=list(range(room_count_before, self.g.vcount())),
+                room_count_before=room_count_before,
+                edge_count_before=edge_count_before,
+                snapshot=self.snapshot(),
+            )
+        if return_flag:
+            self._emit(
+                "door_crossing_confirmed",
+                current_node_id=self.current_node_id,
+                crossed_door=crossed_door,
+                snapshot=self.snapshot(),
+            )
         entry_dist = 100000
         if len(self.g.vs[self.current_node_id]['room_entry']) != 0:
             for node_entry in self.g.vs[self.current_node_id]['room_entry']:
@@ -411,14 +492,17 @@ class Topomap_construction():
 
     def delete_vertice(self, v_id):
         self.g.delete_vertices(v_id)
-        v_num = self.g.vcount()
-        layout = self.g.layout('kk')
-        fig, ax = plt.subplots()
-        """ig.plot(self.g, layout=layout, target=ax, vertex_label=[i for i in range(v_num)])
-        plt.show()"""
+        self.v_num = self.g.vcount()
+        self.current_node_id = min(self.current_node_id, max(0, self.v_num - 1))
+        self._emit(
+            "topology_room_deleted",
+            deleted_room_id=v_id,
+            snapshot=self.snapshot(),
+        )
 
     def choose_door(self, current_location):  # current_location is [y,x], global frame unit is pix
-        current_location.reverse()
+        previous_node_id = self.current_node_id
+        current_location = list(reversed(current_location))
         # first check directly connected vertices
         connected_list = self.g.incident(self.current_node_id, mode='out')
         min_distance = 10000
@@ -482,7 +566,7 @@ class Topomap_construction():
                         min_distance_2 = distance
                         goal_node_idx = node_idx
             """
-            if goal_node_idx:
+            if goal_node_idx is not None:
                 shortest_path = self.g.get_shortest_paths(self.current_node_id, to=goal_node_idx, mode='out', output='epath')
                 #print('goal_idx {}'.format(goal_node_idx))
                 #print('spath {}'.format(shortest_path))
@@ -503,6 +587,20 @@ class Topomap_construction():
             goal = []
             self.g.vs[self.current_node_id]['room_status'] = 'explored'
 
+        if goal:
+            self._emit(
+                "topology_exit_selected",
+                source_node_id=previous_node_id,
+                target_node_id=self.current_node_id,
+                waypoints=goal,
+                snapshot=self.snapshot(),
+            )
+        else:
+            self._emit(
+                "topology_no_exit_available",
+                current_node_id=self.current_node_id,
+                snapshot=self.snapshot(),
+            )
         return goal  # goal is list of [x,y] global frame unit is pix
 
     def get_connected_v(self, edge_idx, start_node_idx):
@@ -534,18 +632,10 @@ class Topomap_construction():
     def use_exist_topomap(self, topomap):
         self.g = topomap
         self.use_topo = True
+        self.v_num = self.g.vcount()
+        self.current_node_id = min(self.current_node_id, max(0, self.v_num - 1))
+        self._emit("topology_restored", snapshot=self.snapshot())
 
 if __name__ == '__main__':
-    prior_door_list = [{'start': [238, 255], 'end': [228, 244]}, {'start': [252, 296], 'end': [261, 306]},
-                       {'start': [266, 307], 'end': [276, 298]}, {'start': [154, 180], 'end': [143, 190]},
-                       {'start': [128, 178], 'end': [138, 188]}, {'start': [107, 156], 'end': [95, 146]},
-                       {'start': [187, 224], 'end': [205, 216]}, {'start': [172, 236], 'end': [160, 252]}]  # [x, y]
-    for content in prior_door_list:
-        content['mid'] = ((np.array(content['start']) + np.array(content['end'])) / 2).tolist()
     topo = Topomap_construction()
-    topo.add_room(prior_door_list[:1], [240, 240])
-    print(topo.choose_door([240,240]))
-    topo.add_room([],[24,24])
-    print(topo.stop_exp())
-    #topo.add_room(([1,1]))
-    #topo.add_room(([1, 1, 1]))
+    print(topo.snapshot())

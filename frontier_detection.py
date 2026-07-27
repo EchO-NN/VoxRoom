@@ -1,16 +1,14 @@
 import numpy as np
-from matplotlib import pyplot as plt
 from queue import Queue
 import cv2
 import time
 from sklearn.cluster import DBSCAN, KMeans
-from arguments import get_args
-args = get_args()
 
 
 class Frontier_detection():
-    def __init__(self, map_size):
+    def __init__(self, map_size, vision_range=60):
         self.map_size = map_size
+        self.vision_range = int(vision_range)
         self.q_m = Queue()
         self.q_f = Queue()
         self.kernel = np.ones((3, 3), np.uint8)  # for dilation
@@ -285,7 +283,7 @@ class Frontier_detection():
             frontier_list.append(frontier)
             bot_detection_circle = np.zeros((exp_map.shape[1], exp_map.shape[1]), np.uint8)
             bot_detection_circle = cv2.circle(bot_detection_circle, (round(frontier[1]), round(frontier[0])),
-                                              args.vision_range, 1, -1)
+                                              self.vision_range, 1, -1)
             info_map = bot_detection_circle*exp_map_
             #info_gain_list.append(np.sum(info_map))
             info_gain_list.append(result_list.count(i))
