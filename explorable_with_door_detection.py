@@ -1293,6 +1293,20 @@ def main():
             return locs, stg, long_term_goal
 
         def room_moving(locs, stg, long_term_goal, first_flag):
+            def global_xy(local_locs):
+                return [
+                    float(
+                        (local_locs[1] + origins[0][1])
+                        * 100
+                        / args.map_resolution
+                    ),
+                    float(
+                        (local_locs[0] + origins[0][0])
+                        * 100
+                        / args.map_resolution
+                    ),
+                ]
+
             achieve_flag = False
             set_runtime_phase("topology_exit_selection")
             exit_goal_list = topo.choose_door([(locs[0] + origins[0][0]) * 100 / args.map_resolution,
@@ -1302,7 +1316,9 @@ def main():
             return_step = 0
             return_threshold = 100#60
             reached_exit_count = 0
+            transition_trajectories = []
             for exit_goal in exit_goal_list:
+                segment_trajectory = [global_xy(locs)]
                 # for return_waypoint in return_list[1:]:
                 long_term_goal = [exit_goal[0] - origins[0][1] * 100 / args.map_resolution,
                                   exit_goal[1] - origins[0][0] * 100 / args.map_resolution]  # convert to local frame
@@ -1313,7 +1329,16 @@ def main():
                     locs, stg, long_term_goal, achieve_flag = go2goal(locs, stg, long_term_goal, first_flag,
                                                                       achieve_criterion=5)  # default is 5
                     if not locs.any():
-                        return locs, stg, long_term_goal, len(exit_goal_list), reached_exit_count
+                        transition_trajectories.append(segment_trajectory)
+                        return (
+                            locs,
+                            stg,
+                            long_term_goal,
+                            len(exit_goal_list),
+                            reached_exit_count,
+                            transition_trajectories,
+                        )
+                    segment_trajectory.append(global_xy(locs))
                     return_step += 1
                     # dist = pu.get_l2_distance(120, long_term_goal[0], 120, long_term_goal[1])
                     if return_step > return_threshold:
@@ -1329,7 +1354,15 @@ def main():
                         )
                         return_step = 0
                 achieve_flag = False
-            return locs, stg, long_term_goal, len(exit_goal_list), reached_exit_count
+                transition_trajectories.append(segment_trajectory)
+            return (
+                locs,
+                stg,
+                long_term_goal,
+                len(exit_goal_list),
+                reached_exit_count,
+                transition_trajectories,
+            )
 
         def exploration(locs):
             global t_start
@@ -1356,7 +1389,14 @@ def main():
                 if not locs.any():
                     return None
                 # here is the room to room moving part
-                locs, stg, long_term_goal, exit_goal_count, reached_exit_count = room_moving(
+                (
+                    locs,
+                    stg,
+                    long_term_goal,
+                    exit_goal_count,
+                    reached_exit_count,
+                    transition_trajectories,
+                ) = room_moving(
                     locs,
                     stg,
                     long_term_goal,
@@ -1368,13 +1408,21 @@ def main():
                 locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)
                 if not locs.any():
                     return None
-                if exit_goal_count > 0 and whether_returning:
+                transition_confirmed, transition_evidence = (
+                    topo.confirm_pending_transition(
+                        transition_trajectories,
+                        reached_exit_count,
+                    )
+                )
+                if exit_goal_count > 0 and transition_confirmed:
                     print('room transition confirmed')
                     record_event(
                         "room_transition_confirmed",
                         exit_goal_count=exit_goal_count,
                         reached_exit_count=reached_exit_count,
                         current_node_id=topo.current_node_id,
+                        confirmation_method="trajectory_geometry",
+                        evidence=transition_evidence,
                     )
                 elif exit_goal_count > 0:
                     print('room transition not confirmed')
@@ -1383,6 +1431,8 @@ def main():
                         exit_goal_count=exit_goal_count,
                         reached_exit_count=reached_exit_count,
                         current_node_id=topo.current_node_id,
+                        confirmation_method="trajectory_geometry",
+                        evidence=transition_evidence,
                     )
                 else:
                     print('no room transition: topology has no exit goal')

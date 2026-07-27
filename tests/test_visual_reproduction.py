@@ -56,6 +56,74 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertIn("topology_no_exit_available", events)
         self.assertNotIn("door_crossing_confirmed", events)
 
+    def test_transition_requires_a_complete_source_to_target_trajectory(self):
+        events = []
+        topology = Topomap_construction(
+            map_size=32,
+            event_callback=lambda event_type, payload: events.append(
+                (event_type, payload)
+            ),
+        )
+        topology.g.add_vertices(1)
+        topology.g.vs[1]["room_status"] = "unexplored"
+        topology.g.vs[1]["room_entry"] = [[20, 10]]
+        topology.g.vs[1]["room_exp"] = []
+        topology.g.add_edges([(0, 1), (1, 0)])
+        topology.g.es[0]["way_point"] = [20, 10]
+        topology.g.es[1]["way_point"] = [10, 10]
+        topology.v_num = topology.g.vcount()
+
+        self.assertEqual(topology.choose_door([10, 10]), [[20, 10]])
+        confirmed, evidence = topology.confirm_pending_transition(
+            [[[10, 10], [14, 10], [16, 10], [20, 10]]],
+            reached_exit_count=1,
+        )
+
+        self.assertTrue(confirmed)
+        self.assertTrue(evidence["segments"][0]["confirmed"])
+        self.assertEqual(topology.current_node_id, 1)
+        confirmed_events = [
+            payload
+            for event_type, payload in events
+            if event_type == "door_crossing_confirmed"
+        ]
+        self.assertEqual(len(confirmed_events), 1)
+        self.assertEqual(
+            confirmed_events[0]["method"],
+            "trajectory_geometry",
+        )
+
+    def test_transition_rejects_target_only_trace_and_restores_source_room(self):
+        events = []
+        topology = Topomap_construction(
+            map_size=32,
+            event_callback=lambda event_type, payload: events.append(
+                event_type
+            ),
+        )
+        topology.g.add_vertices(1)
+        topology.g.vs[1]["room_status"] = "unexplored"
+        topology.g.vs[1]["room_entry"] = [[20, 10]]
+        topology.g.vs[1]["room_exp"] = []
+        topology.g.add_edges([(0, 1), (1, 0)])
+        topology.g.es[0]["way_point"] = [20, 10]
+        topology.g.es[1]["way_point"] = [10, 10]
+        topology.v_num = topology.g.vcount()
+
+        topology.choose_door([10, 10])
+        confirmed, evidence = topology.confirm_pending_transition(
+            [[[16, 10], [20, 10]]],
+            reached_exit_count=1,
+        )
+
+        self.assertFalse(confirmed)
+        self.assertFalse(evidence["segments"][0]["confirmed"])
+        self.assertEqual(topology.current_node_id, 0)
+        self.assertEqual(topology.g.vs[0]["room_status"], "exploring")
+        self.assertEqual(topology.g.vs[1]["room_status"], "unexplored")
+        self.assertIn("door_crossing_geometry_rejected", events)
+        self.assertNotIn("door_crossing_confirmed", events)
+
     def test_dashboard_writes_frames_final_image_and_manifest(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

@@ -216,6 +216,39 @@ def main():
         )
     if "room_scan_profile" not in event_types:
         raise RuntimeError("Topology events do not contain room scan profiles")
+    if args.require_topology_transition:
+        crossing_events = [
+            event
+            for event in topology_events
+            if event.get("event_type") == "door_crossing_confirmed"
+        ]
+        if not crossing_events or any(
+            event.get("method") != "trajectory_geometry"
+            for event in crossing_events
+        ):
+            raise RuntimeError(
+                "Door crossing was not confirmed by trajectory geometry"
+            )
+        for event in crossing_events:
+            segments = event.get("evidence", {}).get("segments", [])
+            if not segments or any(
+                not segment.get("confirmed") for segment in segments
+            ):
+                raise RuntimeError(
+                    "Door crossing geometry contains an unconfirmed segment"
+                )
+        transition_events = [
+            event
+            for event in topology_events
+            if event.get("event_type") == "room_transition_confirmed"
+        ]
+        if not transition_events or any(
+            event.get("confirmation_method") != "trajectory_geometry"
+            for event in transition_events
+        ):
+            raise RuntimeError(
+                "Room transition lacks trajectory geometry confirmation"
+            )
 
     image_sizes = {
         "desktop": check_image(paths["desktop"], (1280, 720)),
