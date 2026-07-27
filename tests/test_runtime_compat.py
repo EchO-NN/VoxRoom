@@ -86,6 +86,28 @@ class RuntimeCompatibilityTests(unittest.TestCase):
             ["noisy_forward", "noisy_right", "noisy_left"],
         )
 
+    def test_habitat_test_task_has_spl_dependencies(self):
+        from habitat.config.default import get_config
+
+        config = get_config(
+            config_paths=[
+                "env/habitat/habitat_api/configs/tasks/pointnav_habitat_test.yaml"
+            ]
+        )
+        self.assertEqual(
+            config.TASK.MEASUREMENTS,
+            ["DISTANCE_TO_GOAL", "SUCCESS", "SPL"],
+        )
+
+    def test_scene_id_uses_current_episode_contract(self):
+        from env.habitat.exploration_env import Exploration_Env
+
+        environment = Exploration_Env.__new__(Exploration_Env)
+        environment._env = SimpleNamespace(
+            current_episode=SimpleNamespace(scene_id="test-scene.glb")
+        )
+        self.assertEqual(environment._current_scene_id(), "test-scene.glb")
+
     def test_habitat_vector_adapter_preserves_original_contract(self):
         from env.habitat.vector_env import VectorEnv
 

@@ -134,6 +134,9 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.trajectory_states.append([self.agent_state.position,
                                        self.agent_state.rotation])
 
+    def _current_scene_id(self):
+        return self.habitat_env.current_episode.scene_id
+
 
     def reset(self):
         args = self.args
@@ -185,7 +188,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             self.mapper.update_map(depth, mapper_gt_pose)
 
         # Initialize variables
-        self.scene_name = self.habitat_env.sim.config.SCENE
+        self.scene_name = self._current_scene_id()
         self.visited = np.zeros(self.map.shape)
         self.visited_vis = np.zeros(self.map.shape)
         self.visited_gt = np.zeros(self.map.shape)
@@ -661,7 +664,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         return output
 
     def _get_gt_map(self, full_map_size):
-        self.scene_name = self.habitat_env.sim.config.SCENE
+        self.scene_name = self._current_scene_id()
         logger.error('Computing map for %s', self.scene_name)
 
         # Get map in habitat simulator coordinates
