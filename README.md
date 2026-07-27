@@ -1,5 +1,5 @@
 # Active room segmentation
-![image](https://github.com/FreeformRobotics/Active_room_segmentation/blob/master/demo/Swormville_demo.gif)
+![image](demo/Swormville_demo.gif)
 
 For the pinned RTX 5090 reproduction, complete live topology dashboard, MP3D
 asset preparation, strict validation, and replay workflow, see

@@ -14,7 +14,7 @@ export TASK_CONFIG="tasks/pointnav_mp3d_visual.yaml"
 export SPLIT="val"
 export REQUIRE_TOPOLOGY_TRANSITION="${REQUIRE_TOPOLOGY_TRANSITION:-1}"
 export VISUALIZATION_FRAME_EVERY_STEPS="${VISUALIZATION_FRAME_EVERY_STEPS:-5}"
-export MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-1000}"
+export MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-2000}"
 export RUN_TAG="${RUN_TAG:-mp3d_visual_${SCENE_ID}_$(date +%Y%m%d_%H%M%S)}"
 
 exec "$ROOT_DIR/scripts/run_habitat_test.sh"

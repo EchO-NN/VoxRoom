@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 
 from PIL import Image, ImageStat
 
@@ -51,6 +52,18 @@ def main():
     parser.add_argument("--require-topology-transition", action="store_true")
     args = parser.parse_args()
 
+    repository_root = Path(__file__).resolve().parents[1]
+    validator_commit = subprocess.check_output(
+        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    validator_changes = subprocess.check_output(
+        ["git", "-C", str(repository_root), "status", "--porcelain"],
+        text=True,
+    ).strip()
+    if validator_changes:
+        raise RuntimeError("Refusing to validate from a dirty source tree")
+
     run_dir = Path(args.run_dir).resolve()
     paths = {
         "result": run_dir / "result.json",
@@ -93,6 +106,21 @@ def main():
         raise RuntimeError("Source commit mismatch between result and metadata")
     if not isinstance(source_commit, str) or len(source_commit) != 40:
         raise RuntimeError("Run artifacts do not contain a full source commit")
+    if subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "merge-base",
+            "--is-ancestor",
+            source_commit,
+            validator_commit,
+        ],
+        check=False,
+    ).returncode != 0:
+        raise RuntimeError(
+            "Run source commit is not an ancestor of the validator commit"
+        )
     if visualization.get("run_id") != args.run_id:
         raise RuntimeError("Run ID mismatch in visualization evidence")
     if visualization.get("window_title") != result.get("window_title"):
@@ -223,14 +251,18 @@ def main():
             if event.get("event_type") == "door_crossing_confirmed"
         ]
         if not crossing_events or any(
-            event.get("method") != "trajectory_geometry"
+            event.get("payload", {}).get("method") != "trajectory_geometry"
             for event in crossing_events
         ):
             raise RuntimeError(
                 "Door crossing was not confirmed by trajectory geometry"
             )
         for event in crossing_events:
-            segments = event.get("evidence", {}).get("segments", [])
+            segments = (
+                event.get("payload", {})
+                .get("evidence", {})
+                .get("segments", [])
+            )
             if not segments or any(
                 not segment.get("confirmed") for segment in segments
             ):
@@ -243,7 +275,8 @@ def main():
             if event.get("event_type") == "room_transition_confirmed"
         ]
         if not transition_events or any(
-            event.get("confirmation_method") != "trajectory_geometry"
+            event.get("payload", {}).get("confirmation_method")
+            != "trajectory_geometry"
             for event in transition_events
         ):
             raise RuntimeError(
@@ -297,6 +330,7 @@ def main():
         "run_id": args.run_id,
         "process_id": process_id,
         "source_commit": source_commit,
+        "validator_commit": validator_commit,
         "steps": args.expected_steps,
         "image_sizes": image_sizes,
         "image_sha256": image_hashes,
@@ -310,6 +344,11 @@ def main():
         "visualization_frame_count": frame_count,
         "replay": paths["replay"].name,
         "runtime_timing": runtime_timing,
+        "crossing_evidence": (
+            crossing_events[0]["payload"]["evidence"]
+            if args.require_topology_transition
+            else None
+        ),
     }
     write_json_atomic(run_dir / "validation.json", report)
     print(json.dumps(report, indent=2, sort_keys=True))
