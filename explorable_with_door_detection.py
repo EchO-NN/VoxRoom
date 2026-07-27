@@ -32,7 +32,7 @@ from topomap_construction import Topomap_construction
 # from hough_door_detection import hough_detection
 from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
-from time import time
+from time import perf_counter, time
 from visualization import RuntimeDashboard, TopologyEventRecorder
 
 def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
@@ -219,6 +219,36 @@ def main():
         "action": "none",
         "topology_exploration_complete_step": None,
     }
+    runtime_timings = {}
+
+    def accumulate_timing(name, duration):
+        duration = float(duration)
+        stats = runtime_timings.setdefault(
+            str(name),
+            {
+                "count": 0,
+                "total_seconds": 0.0,
+                "max_seconds": 0.0,
+                "last_seconds": 0.0,
+            },
+        )
+        stats["count"] += 1
+        stats["total_seconds"] += duration
+        stats["max_seconds"] = max(stats["max_seconds"], duration)
+        stats["last_seconds"] = duration
+
+    def timing_summary():
+        return {
+            name: {
+                **stats,
+                "mean_seconds": (
+                    stats["total_seconds"] / stats["count"]
+                    if stats["count"]
+                    else 0.0
+                ),
+            }
+            for name, stats in sorted(runtime_timings.items())
+        }
 
     def record_event(event_type, **payload):
         return event_recorder.record(
@@ -897,11 +927,14 @@ def main():
                         filterd_hough_list.append(grid_idx)
                         stage2_door_map[grid_idx[1], grid_idx[0]] = 1
 
+                door_filter_started = perf_counter()
                 door_list, raw_list = \
                     door_detect.door_filter(gt_door_local_map, gt_map, gt_exp, global_loc_xy_pix, bot_last_loc,
                                             detected_door_list,
                                             use_12point=False,
                                             external_door_point=filterd_hough_list)
+                door_filter_seconds = perf_counter() - door_filter_started
+                accumulate_timing("door_filter", door_filter_seconds)
 
                 # uncomment these two is frontier method
                 #door_list.clear()
@@ -958,17 +991,57 @@ def main():
                                                                                        laser_list
                                                                                        )  # [y, x] close_door_list
                 #step_list.append(time()-f_start_time)
+                primary_frontier_profile = frontier_detector.last_profile.copy()
+                accumulate_timing(
+                    "frontier_primary",
+                    primary_frontier_profile["total_seconds"],
+                )
+                accumulate_timing(
+                    "frontier_primary_wavefront",
+                    primary_frontier_profile["wavefront_seconds"],
+                )
+                same_node_started = perf_counter()
                 detected_door_list = topo.same_node_check(room_exp_list, detected_door_list)
+                same_node_seconds = perf_counter() - same_node_started
+                accumulate_timing("topology_same_node", same_node_seconds)
                 # combine the node for loop case, common this if pure frontier
+                topo.frontier_detector.last_profile = {}
+                topology_check_started = perf_counter()
                 door_list, door_remove_list = topo.check_topomap(door_list, detected_door_list,
                                                                  room_exp_list, current_loc, gt_map, gt_exp, lmb[0], door_grid, scene_idx, scene_name, laser_list)
+                topology_check_seconds = perf_counter() - topology_check_started
+                topology_frontier_profile = topo.frontier_detector.last_profile.copy()
+                accumulate_timing("topology_check", topology_check_seconds)
+                if topology_frontier_profile:
+                    accumulate_timing(
+                        "frontier_topology",
+                        topology_frontier_profile["total_seconds"],
+                    )
+                    accumulate_timing(
+                        "frontier_topology_wavefront",
+                        topology_frontier_profile["wavefront_seconds"],
+                    )
 
                 # these two for pure frontier
                 #door_list = []
                 #door_remove_list = []
                 # check topomap checks the detected door's relation with the current node
+                add_room_started = perf_counter()
                 in_point, return_flag = topo.add_room(door_list, [absolute_locs[1] * 100 / 5, absolute_locs[0] * 100 / 5],
                                          gt_map, gt_exp, lmb[0])
+                add_room_seconds = perf_counter() - add_room_started
+                accumulate_timing("topology_add_room", add_room_seconds)
+                record_event(
+                    "room_scan_profile",
+                    timings_seconds={
+                        "door_filter": door_filter_seconds,
+                        "topology_same_node": same_node_seconds,
+                        "topology_check": topology_check_seconds,
+                        "topology_add_room": add_room_seconds,
+                    },
+                    primary_frontier=primary_frontier_profile,
+                    topology_frontier=topology_frontier_profile,
+                )
                 in_point.reverse()  # in point is the entry of the current node, this can make sure that the searching range
                 # is within the current room even if the robot is going out of the current room
 
@@ -1422,6 +1495,7 @@ def main():
                 visualization_manifest.get("frame_count", 0)
             ),
             "visualization_final": visualization_manifest.get("final_image"),
+            "runtime_timing": timing_summary(),
         }
         write_json_atomic(run_dir / "result.json", summary)
         envs.close()

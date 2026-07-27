@@ -1,8 +1,53 @@
 import numpy as np
 from queue import Queue
 import cv2
-import time
+from time import perf_counter
 from sklearn.cluster import DBSCAN, KMeans
+
+
+class _OrderedPointSet:
+    """List-compatible point collection with constant-time membership/removal."""
+
+    def __init__(self):
+        self._points = {}
+
+    @staticmethod
+    def _key(point):
+        values = point.tolist() if isinstance(point, np.ndarray) else list(point)
+        return tuple(
+            value.item() if isinstance(value, np.generic) else value
+            for value in values
+        )
+
+    def append(self, point):
+        key = self._key(point)
+        if key not in self._points:
+            self._points[key] = list(key)
+
+    def extend(self, points):
+        for point in points:
+            self.append(point)
+
+    def remove(self, point):
+        key = self._key(point)
+        if key not in self._points:
+            raise ValueError("{} is not in collection".format(list(key)))
+        del self._points[key]
+
+    def clear(self):
+        self._points.clear()
+
+    def copy(self):
+        return [point.copy() for point in self._points.values()]
+
+    def __contains__(self, point):
+        return self._key(point) in self._points
+
+    def __iter__(self):
+        return iter(self._points.values())
+
+    def __len__(self):
+        return len(self._points)
 
 
 class Frontier_detection():
@@ -13,13 +58,13 @@ class Frontier_detection():
         self.q_f = Queue()
         self.kernel = np.ones((3, 3), np.uint8)  # for dilation
         self.new_frontier = []
-        self.MCL = []
-        self.MOL = []
-        self.FOL = []
-        self.FCL = []
+        self.MCL = _OrderedPointSet()
+        self.MOL = _OrderedPointSet()
+        self.FOL = _OrderedPointSet()
+        self.FCL = _OrderedPointSet()
         self.new_frontier_save = []
         self.bot_mask = np.zeros((map_size, map_size), np.uint8)
-        self.door_gird = []  # set up the door_grid list to make sure that the door_grid will not be eroded by scanning
+        self.door_gird = _OrderedPointSet()  # door cells must not be eroded by scanning
         #MCL: map-close-list
         #MOL: map-open-list
         #FOL: frontier-open-list
@@ -27,8 +72,10 @@ class Frontier_detection():
         self.bot_near_range = 30
         self.first_round_flag = True
         self.map = np.ones((self.map_size, self.map_size)) * 0.5
+        self.last_profile = {}
 
     def frontier_detection(self, start_point, current_pose, obs_map, exp_map, lmb, close_door_list, laser_list = None):  # the current_pose is under global frame[y, x]
+        total_started = perf_counter()
         self.new_frontier_save.clear()
         self.MCL.clear()
         self.MOL.clear()
@@ -120,7 +167,7 @@ class Frontier_detection():
         self.q_m.queue.clear()
         self.q_m.put(current_pose)
         self.add_to_list(current_pose, 'MOL')
-        t1 = time.time()
+        search_started = perf_counter()
         while not self.q_m.empty():
             p = self.q_m.get()
             if p in self.MCL or self.map[p[0], p[1]] == 1:# or self.map[p[0], p[1]] == 1
@@ -161,6 +208,7 @@ class Frontier_detection():
                         self.q_m.put(v)
                         self.add_to_list(v, 'MOL')
             self.add_to_list(p, 'MCL')
+        search_finished = perf_counter()
         #print(self.new_frontier)
         #print('frontier searching time {}'.format(time.time()-t1))
         """plt.ion()
@@ -179,8 +227,26 @@ class Frontier_detection():
         # plt.plot(way_point_1[1], way_point_1[0], 'o', color = 'blue')
         # plt.plot(way_point_2[1], way_point_2[0], 'o', color='purple')
         plt.show()"""
+        cluster_started = perf_counter()
         f_list, info_gain_list = self.frontier_cluster(self.new_frontier_save, self.exp_map)
-        return f_list, info_gain_list, self.map, self.MCL, self.door_gird
+        finished = perf_counter()
+        self.last_profile = {
+            "preprocess_seconds": search_started - total_started,
+            "wavefront_seconds": search_finished - search_started,
+            "cluster_seconds": finished - cluster_started,
+            "total_seconds": finished - total_started,
+            "closed_point_count": len(self.MCL),
+            "frontier_point_count": len(self.new_frontier_save),
+            "frontier_cluster_count": len(f_list),
+            "door_grid_count": len(self.door_gird),
+        }
+        return (
+            f_list,
+            info_gain_list,
+            self.map,
+            self.MCL.copy(),
+            self.door_gird.copy(),
+        )
 
     def close_door(self, start, end):
         line_canvas = np.zeros((self.exp_map.shape[0], self.exp_map.shape[1]), np.uint8)

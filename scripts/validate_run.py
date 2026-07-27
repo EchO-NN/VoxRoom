@@ -164,6 +164,23 @@ def main():
         raise RuntimeError("Progress contains a step without an action label")
     if any("topology_room_count" not in event for event in progress):
         raise RuntimeError("Progress is missing topology state")
+    runtime_timing = result.get("runtime_timing", {})
+    required_timing_stages = {
+        "door_filter",
+        "frontier_primary",
+        "frontier_primary_wavefront",
+        "topology_check",
+    }
+    if not required_timing_stages.issubset(runtime_timing):
+        raise RuntimeError(
+            "Missing runtime timing stages: {}".format(
+                sorted(required_timing_stages - set(runtime_timing))
+            )
+        )
+    for stage in required_timing_stages:
+        stats = runtime_timing[stage]
+        if stats.get("count", 0) < 1 or stats.get("total_seconds", -1) < 0:
+            raise RuntimeError("Invalid runtime timing for {}".format(stage))
 
     topology_events = [
         json.loads(line)
@@ -197,6 +214,8 @@ def main():
                 sorted(required_event_types - event_types)
             )
         )
+    if "room_scan_profile" not in event_types:
+        raise RuntimeError("Topology events do not contain room scan profiles")
 
     image_sizes = {
         "desktop": check_image(paths["desktop"], (1280, 720)),
@@ -257,6 +276,7 @@ def main():
         "topology_event_count": len(topology_events),
         "visualization_frame_count": frame_count,
         "replay": paths["replay"].name,
+        "runtime_timing": runtime_timing,
     }
     write_json_atomic(run_dir / "validation.json", report)
     print(json.dumps(report, indent=2, sort_keys=True))

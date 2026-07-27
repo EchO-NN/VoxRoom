@@ -49,6 +49,24 @@ def load_source_episode(path):
     return episode, goal
 
 
+def measure_navmesh(navmesh_path, start, goal):
+    pathfinder = habitat_sim.PathFinder()
+    if not pathfinder.load_nav_mesh(str(navmesh_path)):
+        raise RuntimeError("Habitat-Sim failed to load {}".format(navmesh_path))
+    start_array = np.asarray(start, dtype=np.float32)
+    goal_array = np.asarray(goal, dtype=np.float32)
+    if not pathfinder.is_navigable(start_array):
+        raise RuntimeError("Source start position is not navigable")
+    if not pathfinder.is_navigable(goal_array):
+        raise RuntimeError("Source goal position is not navigable")
+    shortest_path = habitat_sim.ShortestPath()
+    shortest_path.requested_start = start_array
+    shortest_path.requested_end = goal_array
+    if not pathfinder.find_path(shortest_path):
+        raise RuntimeError("Source start and goal are not connected")
+    return float(shortest_path.geodesic_distance)
+
+
 def build_navmesh(scene_path, navmesh_path, start, goal):
     simulator_config = habitat_sim.SimulatorConfiguration()
     simulator_config.scene_id = str(scene_path)
@@ -65,17 +83,8 @@ def build_navmesh(scene_path, navmesh_path, start, goal):
         settings.agent_max_slope = 45.0
         if not simulator.recompute_navmesh(simulator.pathfinder, settings):
             raise RuntimeError("Habitat-Sim failed to build the MP3D navmesh")
-        if not simulator.pathfinder.is_navigable(np.asarray(start, dtype=np.float32)):
-            raise RuntimeError("Source start position is not navigable")
-        if not simulator.pathfinder.is_navigable(np.asarray(goal, dtype=np.float32)):
-            raise RuntimeError("Source goal position is not navigable")
-        shortest_path = habitat_sim.ShortestPath()
-        shortest_path.requested_start = np.asarray(start, dtype=np.float32)
-        shortest_path.requested_end = np.asarray(goal, dtype=np.float32)
-        if not simulator.pathfinder.find_path(shortest_path):
-            raise RuntimeError("Source start and goal are not connected")
         simulator.pathfinder.save_nav_mesh(str(navmesh_path))
-        return float(shortest_path.geodesic_distance)
+    return measure_navmesh(navmesh_path, start, goal)
 
 
 def main():
@@ -147,9 +156,7 @@ def main():
             goal,
         )
     else:
-        geodesic_distance = float(
-            source_episode.get("info", {}).get("geodesic_distance", 0.0)
-        )
+        geodesic_distance = measure_navmesh(navmesh_path, start, goal)
     if not navmesh_path.is_file() or navmesh_path.stat().st_size == 0:
         raise RuntimeError("The generated navmesh is missing")
 
@@ -192,6 +199,7 @@ def main():
         "scene_link": str(scene_link),
         "navmesh": str(navmesh_path),
         "navmesh_size": navmesh_path.stat().st_size,
+        "navmesh_sha256": sha256(navmesh_path),
         "dataset": str(dataset_path),
         "start_position": start,
         "goal_position": goal,
