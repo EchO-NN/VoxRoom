@@ -59,7 +59,7 @@ HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
 )
 
 
-def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=2):
+def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=3):
     navigation_free = np.asarray(navigation_free, dtype=bool)
     if navigation_free.ndim != 2 or navigation_free.size == 0:
         raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
@@ -796,7 +796,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
                 planning_window,
                 navigation_free=navigation_free,
             )
-        except Exception as exc:
+        except (RuntimeError, ValueError) as exc:
             if navigation_free is not None:
                 failure_path = Path(self.args.run_dir) / "planner_failure.json"
                 temporary = failure_path.with_name(
@@ -1023,7 +1023,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
                 snap_voxroom_start_to_free(
                     navigation_free,
                     start,
-                    max_radius_cells=2,
+                    max_radius_cells=3,
                 )
             )
             projected_goal = project_voxroom_goal_to_reachable_free(
