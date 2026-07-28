@@ -12,27 +12,31 @@ from env.habitat.exploration_env import (
     project_voxroom_goal_to_reachable_free,
     snap_voxroom_start_to_free,
 )
-from voxroom_sidecar import apply_navigation_projection, load_navigation_projection
+from voxroom_sidecar import (
+    apply_navigation_projection,
+    load_navigation_projection,
+    local_navigation_projection,
+)
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
-    def test_start_cell_snaps_only_within_five_voxroom_cells(self):
-        navigation_free = np.zeros((15, 15), dtype=bool)
-        navigation_free[9, 12] = True
+    def test_start_cell_snaps_only_within_one_voxroom_cell(self):
+        navigation_free = np.zeros((7, 7), dtype=bool)
+        navigation_free[4, 4] = True
 
         snapped = snap_voxroom_start_to_free(
             navigation_free,
-            start=(7, 7),
-            max_radius_cells=5,
+            start=(3, 3),
+            max_radius_cells=1,
         )
 
-        self.assertEqual(snapped, (9, 12))
+        self.assertEqual(snapped, (4, 4))
 
         with self.assertRaisesRegex(RuntimeError, "no VoxRoom free anchor"):
             snap_voxroom_start_to_free(
                 navigation_free,
                 start=(1, 1),
-                max_radius_cells=5,
+                max_radius_cells=1,
             )
 
     def test_frontier_goal_projects_to_nearest_start_component_free_cell(self):
@@ -113,6 +117,10 @@ class VoxRoomGeometryTests(unittest.TestCase):
         info = {
             "gt_map": np.full(free.shape, 9.0, dtype=np.float32),
             "gt_exp": np.full(free.shape, 8.0, dtype=np.float32),
+            "voxroom_base_pose_world_xyzyaw": np.asarray(
+                [0.0, 0.0, 0.0, 0.0],
+                dtype=np.float64,
+            ),
         }
         apply_navigation_projection(info, navigation)
 
@@ -124,11 +132,37 @@ class VoxRoomGeometryTests(unittest.TestCase):
         self.assertTrue(info["gt_map"][1, 4])
         self.assertTrue(info["gt_exp"][1, 4])
         self.assertFalse(info["voxroom_navigation_free"][1, 4])
+        np.testing.assert_array_equal(
+            info["voxroom_navigation_agent_cell"],
+            [2, 2],
+        )
 
-        reset_info = {}
+        reset_info = {
+            "voxroom_base_pose_world_xyzyaw": np.asarray(
+                [0.0, 0.0, 0.0, 0.0],
+                dtype=np.float64,
+            ),
+        }
         apply_navigation_projection(reset_info, navigation)
         self.assertEqual(reset_info["gt_map"].shape, free.shape)
         self.assertEqual(reset_info["gt_exp"].shape, free.shape)
+
+    def test_local_navigation_projection_uses_exact_voxroom_agent_cell(self):
+        navigation_free = np.zeros((8, 9), dtype=np.uint8)
+        navigation_free[5, 6] = 1
+        info = {
+            "voxroom_navigation_free": navigation_free,
+            "voxroom_navigation_agent_cell": np.asarray([5, 6], dtype=np.int32),
+        }
+
+        local_free, local_agent = local_navigation_projection(
+            info,
+            (3, 7, 4, 8),
+        )
+
+        self.assertEqual(local_free.shape, (4, 4))
+        np.testing.assert_array_equal(local_agent, [2, 2])
+        self.assertTrue(local_free[tuple(local_agent)])
 
     def test_normalized_depth_is_restored_to_meters_without_downsampling(self):
         normalized = np.asarray(

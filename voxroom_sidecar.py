@@ -169,8 +169,73 @@ def apply_navigation_projection(info, navigation):
         navigation["unknown"],
         dtype=np.uint8,
     )
+    base_pose = np.asarray(
+        info["voxroom_base_pose_world_xyzyaw"],
+        dtype=np.float64,
+    ).reshape(-1)
+    if base_pose.size != 4 or not np.all(np.isfinite(base_pose)):
+        raise RuntimeError("VoxRoom base pose is invalid")
+    bounds = np.asarray(
+        navigation["bounds_xyxy_m"],
+        dtype=np.float64,
+    ).reshape(4)
+    resolution_m = float(navigation["resolution_m"])
+    agent_cell = np.asarray(
+        [
+            int(np.floor((base_pose[1] - bounds[1]) / resolution_m)),
+            int(np.floor((base_pose[0] - bounds[0]) / resolution_m)),
+        ],
+        dtype=np.int32,
+    )
+    if not (
+        0 <= int(agent_cell[0]) < int(expected_shape[0])
+        and 0 <= int(agent_cell[1]) < int(expected_shape[1])
+    ):
+        raise RuntimeError(
+            "VoxRoom agent cell {} is outside navigation shape {}".format(
+                agent_cell.tolist(),
+                expected_shape,
+            )
+        )
+    info["voxroom_navigation_agent_cell"] = agent_cell
     info["navigation_map_source"] = "voxroom_last_voxel_navigation_projection"
     info["navigation_map_step"] = int(navigation["step"])
+
+
+def local_navigation_projection(info, planning_window):
+    if "voxroom_navigation_free" not in info:
+        return None, None
+    if "voxroom_navigation_agent_cell" not in info:
+        raise RuntimeError("VoxRoom navigation is missing the exact agent cell")
+    gx1, gx2, gy1, gy2 = (int(value) for value in planning_window)
+    navigation_free = np.asarray(info["voxroom_navigation_free"], dtype=bool)
+    if not (
+        0 <= gx1 < gx2 <= navigation_free.shape[0]
+        and 0 <= gy1 < gy2 <= navigation_free.shape[1]
+    ):
+        raise RuntimeError("Active Room local-map window is outside VoxRoom navigation")
+    agent_cell = np.asarray(
+        info["voxroom_navigation_agent_cell"],
+        dtype=np.int64,
+    ).reshape(-1)
+    if agent_cell.size != 2:
+        raise RuntimeError("VoxRoom navigation agent cell is invalid")
+    local_agent_cell = np.asarray(
+        [int(agent_cell[0]) - gx1, int(agent_cell[1]) - gy1],
+        dtype=np.int32,
+    )
+    local_navigation = navigation_free[gx1:gx2, gy1:gy2].copy()
+    if not (
+        0 <= int(local_agent_cell[0]) < local_navigation.shape[0]
+        and 0 <= int(local_agent_cell[1]) < local_navigation.shape[1]
+    ):
+        raise RuntimeError(
+            "Exact VoxRoom agent cell {} is outside Active Room local window {}".format(
+                agent_cell.tolist(),
+                [gx1, gx2, gy1, gy2],
+            )
+        )
+    return local_navigation, local_agent_cell
 
 
 class VoxRoomSidecarClient:

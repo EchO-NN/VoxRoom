@@ -59,7 +59,7 @@ HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
 )
 
 
-def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=5):
+def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=1):
     navigation_free = np.asarray(navigation_free, dtype=bool)
     if navigation_free.ndim != 2 or navigation_free.size == 0:
         raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
@@ -712,6 +712,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         grid = np.rint(map_pred)
         explored = np.rint(exp_pred)
         navigation_free = inputs.get("navigation_free_pred")
+        navigation_start = inputs.get("navigation_start_pred")
         if navigation_free is not None:
             navigation_free = np.asarray(navigation_free, dtype=bool)
             if navigation_free.shape != grid.shape:
@@ -721,6 +722,10 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
                         grid.shape,
                     )
                 )
+            if navigation_start is None:
+                raise RuntimeError("VoxRoom navigation is missing the exact planner start")
+        elif navigation_start is not None:
+            raise RuntimeError("VoxRoom planner start was provided without navigation")
 
         # Get pose prediction and global policy planning window
         start_x, start_y, start_o, gx1, gx2, gy1, gy2 = inputs['pose_pred']
@@ -740,6 +745,20 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         start = [int(r * 100.0/args.map_resolution - gx1),
                  int(c * 100.0/args.map_resolution - gy1)]
         start = pu.threshold_poses(start, grid.shape)
+        if navigation_free is not None:
+            navigation_start = np.asarray(
+                navigation_start,
+                dtype=np.int64,
+            ).reshape(-1)
+            if navigation_start.size != 2:
+                raise RuntimeError("VoxRoom planner start must contain two grid coordinates")
+            start = list(
+                snap_voxroom_start_to_free(
+                    navigation_free,
+                    navigation_start,
+                    max_radius_cells=1,
+                )
+            )
         #TODO: try reducing this
 
         #self.visited[gx1:gx2, gy1:gy2][start[0]-2:start[0]+3,
@@ -1019,13 +1038,8 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             navigation_free = np.asarray(navigation_free, dtype=bool)
             if navigation_free.shape != grid.shape:
                 raise RuntimeError("VoxRoom navigation-free map shape changed during planning")
-            start = list(
-                snap_voxroom_start_to_free(
-                    navigation_free,
-                    start,
-                    max_radius_cells=5,
-                )
-            )
+            if not navigation_free[tuple(start)]:
+                raise RuntimeError("Exact VoxRoom planner start is not free")
             projected_goal = project_voxroom_goal_to_reachable_free(
                 navigation_free,
                 start,
