@@ -3,6 +3,9 @@ import os
 import pickle
 from pathlib import Path
 import sys
+import json
+import time
+import traceback
 import cv2
 import gym
 import matplotlib
@@ -784,14 +787,37 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.intrinsic_rew = -exp_pred[goal[0], goal[1]]
 
         # Get short-term goal
-        stg = self._get_stg(
-            grid,
-            explored,
-            start,
-            np.copy(goal),
-            planning_window,
-            navigation_free=navigation_free,
-        )
+        try:
+            stg = self._get_stg(
+                grid,
+                explored,
+                start,
+                np.copy(goal),
+                planning_window,
+                navigation_free=navigation_free,
+            )
+        except Exception as exc:
+            if navigation_free is not None:
+                failure_path = Path(self.args.run_dir) / "planner_failure.json"
+                temporary = failure_path.with_name(
+                    ".{}.{}.tmp".format(failure_path.name, os.getpid())
+                )
+                payload = {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "start": [int(value) for value in start],
+                    "goal": [int(value) for value in goal],
+                    "navigation_free_cells": int(np.count_nonzero(navigation_free)),
+                    "navigation_shape": [int(value) for value in navigation_free.shape],
+                    "timestamp_unix": time.time(),
+                    "traceback": traceback.format_exc(),
+                }
+                temporary.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(str(temporary), str(failure_path))
+            raise
 
         # Find GT action
         if self.args.eval or not self.args.train_local:
