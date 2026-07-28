@@ -820,6 +820,7 @@ def main():
             ).transpose()
             room_labels = dashboard.navigation_clipped_room_labels(
                 occupied,
+                explored,
                 room_labels,
             )
             explored_ratio = float(info.get("exp_ratio") or 0.0)

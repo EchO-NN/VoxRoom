@@ -215,17 +215,20 @@ class VisualReproductionTests(unittest.TestCase):
     def test_dashboard_clips_historical_room_labels_on_current_occupied(self):
         occupied = np.zeros((8, 9), dtype=np.float32)
         occupied[2, 6] = 1.0
+        explored = np.zeros((8, 9), dtype=np.float32)
+        explored[2, 5:7] = 1.0
         labels = np.zeros((8, 9), dtype=np.uint16)
         labels[2, 5:8] = 3
 
         clipped = RuntimeDashboard.navigation_clipped_room_labels(
             occupied,
+            explored,
             labels,
         )
 
         self.assertEqual(clipped[2, 5], 3)
         self.assertEqual(clipped[2, 6], 0)
-        self.assertEqual(clipped[2, 7], 3)
+        self.assertEqual(clipped[2, 7], 0)
         self.assertEqual(labels[2, 6], 3)
 
     def test_dashboard_writes_frames_final_image_and_manifest(self):

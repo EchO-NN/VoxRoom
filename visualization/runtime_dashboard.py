@@ -278,17 +278,18 @@ class RuntimeDashboard:
             )
 
     @staticmethod
-    def navigation_clipped_room_labels(occupied, room_labels):
+    def navigation_clipped_room_labels(occupied, explored, room_labels):
         occupied = np.asarray(occupied) > 0.5
+        explored = np.asarray(explored) > 0.5
         labels = np.asarray(room_labels)
-        if labels.shape != occupied.shape:
+        if labels.shape != occupied.shape or explored.shape != occupied.shape:
             raise RuntimeError(
-                "Occupied and room-label maps must have one shape"
+                "Occupied, explored, and room-label maps must have one shape"
             )
         if not np.issubdtype(labels.dtype, np.integer):
             raise TypeError("Room-label map must use an integer dtype")
         clipped = labels.copy()
-        clipped[occupied] = 0
+        clipped[occupied | ~explored] = 0
         return clipped
 
     @staticmethod
