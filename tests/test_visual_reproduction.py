@@ -191,6 +191,27 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertEqual(labels[8, 9], 2)
         self.assertEqual(labels[0, 0], 0)
 
+    def test_dashboard_room_labels_use_same_transpose_as_active_maps(self):
+        explored_source = np.zeros((12, 12), dtype=np.float32)
+        explored_source[1:4, 7:11] = 1.0
+        labels_source = np.zeros_like(explored_source, dtype=np.uint16)
+        labels_source[1:4, 7:11] = 1
+        occupied_display = np.zeros_like(explored_source)
+        explored_display = explored_source.transpose()
+
+        with self.assertRaisesRegex(RuntimeError, "grossly misaligned"):
+            RuntimeDashboard._validate_room_alignment(
+                occupied_display,
+                explored_display,
+                labels_source,
+            )
+
+        RuntimeDashboard._validate_room_alignment(
+            occupied_display,
+            explored_display,
+            labels_source.transpose(),
+        )
+
     def test_dashboard_writes_frames_final_image_and_manifest(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
