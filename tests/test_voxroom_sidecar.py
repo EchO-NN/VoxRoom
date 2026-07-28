@@ -16,23 +16,23 @@ from voxroom_sidecar import apply_navigation_projection, load_navigation_project
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
-    def test_start_cell_snaps_only_within_three_voxroom_cells(self):
-        navigation_free = np.zeros((11, 11), dtype=bool)
-        navigation_free[5, 8] = True
+    def test_start_cell_snaps_only_within_five_voxroom_cells(self):
+        navigation_free = np.zeros((15, 15), dtype=bool)
+        navigation_free[9, 12] = True
 
         snapped = snap_voxroom_start_to_free(
             navigation_free,
-            start=(5, 5),
-            max_radius_cells=3,
+            start=(7, 7),
+            max_radius_cells=5,
         )
 
-        self.assertEqual(snapped, (5, 8))
+        self.assertEqual(snapped, (9, 12))
 
         with self.assertRaisesRegex(RuntimeError, "no VoxRoom free anchor"):
             snap_voxroom_start_to_free(
                 navigation_free,
                 start=(1, 1),
-                max_radius_cells=3,
+                max_radius_cells=5,
             )
 
     def test_frontier_goal_projects_to_nearest_start_component_free_cell(self):

@@ -59,7 +59,7 @@ HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
 )
 
 
-def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=3):
+def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=5):
     navigation_free = np.asarray(navigation_free, dtype=bool)
     if navigation_free.ndim != 2 or navigation_free.size == 0:
         raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
@@ -1023,7 +1023,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
                 snap_voxroom_start_to_free(
                     navigation_free,
                     start,
-                    max_radius_cells=3,
+                    max_radius_cells=5,
                 )
             )
             projected_goal = project_voxroom_goal_to_reachable_free(
