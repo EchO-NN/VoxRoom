@@ -9,8 +9,12 @@ class Topomap_construction():
         self.g = ig.Graph(n=1, directed=True)  # the robot initial position is one room node
         self.current_node_id = 0
         self.v_num = self.g.vcount()
+        self.next_room_stable_id = 1
+        self.next_edge_stable_id = 0
         #self.g.vs['room_idx'] = [0]
         self.g.es['way_point'] = []  # shown then global point of going through one door, one door has two waypoints
+        self.g.es['stable_id'] = []
+        self.g.vs['stable_id'] = [0]
         self.g.vs['room_status'] = ['exploring']
         self.g.vs['room_entry'] = [[]]
         self.g.vs['room_exp'] = [[]]
@@ -42,7 +46,73 @@ class Topomap_construction():
         if self.event_callback is not None:
             self.event_callback(str(event_type), self._plain(payload))
 
+    def _validate_stable_ids(self):
+        validated = {}
+        for sequence, attribute_name in (
+            (self.g.vs, "vertex"),
+            (self.g.es, "edge"),
+        ):
+            if "stable_id" not in sequence.attribute_names():
+                raise RuntimeError(
+                    "Topology {} stable IDs are missing".format(attribute_name)
+                )
+            values = sequence["stable_id"]
+            if any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or int(value) < 0
+                for value in values
+            ):
+                raise RuntimeError(
+                    "Topology {} stable IDs are invalid".format(attribute_name)
+                )
+            stable_ids = [int(value) for value in values]
+            if len(stable_ids) != len(set(stable_ids)):
+                raise RuntimeError(
+                    "Duplicate {} stable IDs in topology".format(attribute_name)
+                )
+            validated[attribute_name] = stable_ids
+        return validated["vertex"], validated["edge"]
+
+    def _add_rooms(self, count):
+        self._validate_stable_ids()
+        first_vertex_idx = self.g.vcount()
+        self.g.add_vertices(count)
+        added_vertex_ids = list(
+            range(first_vertex_idx, first_vertex_idx + count)
+        )
+        for vertex_idx in added_vertex_ids:
+            self.g.vs[vertex_idx]["stable_id"] = self.next_room_stable_id
+            self.next_room_stable_id += 1
+        self._validate_stable_ids()
+        return added_vertex_ids
+
+    def _node_index_for_stable_id(self, stable_id):
+        self._validate_stable_ids()
+        matches = [
+            vertex.index
+            for vertex in self.g.vs
+            if int(vertex["stable_id"]) == int(stable_id)
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "Topology node stable ID {} does not resolve uniquely".format(
+                    stable_id
+                )
+            )
+        return matches[0]
+
+    def _add_edge(self, source, target):
+        self._validate_stable_ids()
+        self.g.add_edge(source, target)
+        edge_idx = self.g.ecount() - 1
+        self.g.es[edge_idx]["stable_id"] = self.next_edge_stable_id
+        self.next_edge_stable_id += 1
+        self._validate_stable_ids()
+        return edge_idx
+
     def snapshot(self):
+        self._validate_stable_ids()
         nodes = []
         for node_id in range(self.g.vcount()):
             entries = self.g.vs[node_id]["room_entry"] or []
@@ -50,6 +120,7 @@ class Topomap_construction():
             nodes.append(
                 {
                     "id": node_id,
+                    "stable_id": int(self.g.vs[node_id]["stable_id"]),
                     "room_status": self.g.vs[node_id]["room_status"],
                     "room_entries": self._plain(entries),
                     "room_entry_count": len(entries),
@@ -61,8 +132,11 @@ class Topomap_construction():
             edges.append(
                 {
                     "id": edge_id,
+                    "stable_id": int(self.g.es[edge_id]["stable_id"]),
                     "source": source,
                     "target": target,
+                    "source_stable_id": int(self.g.vs[source]["stable_id"]),
+                    "target_stable_id": int(self.g.vs[target]["stable_id"]),
                     "way_point": self._plain(self.g.es[edge_id]["way_point"]),
                 }
             )
@@ -111,8 +185,11 @@ class Topomap_construction():
                             self.g.vs[self.current_node_id]['room_entry'].remove(self.g.es[inedge_idx]['way_point'])
                             #break
                             continue
-                        self.g.add_edges([[in_node, self.current_node_id]])
-                        self.g.es[self.g.ecount()-1]['way_point'] = self.g.es[inedge_idx]['way_point']
+                        new_edge_idx = self._add_edge(
+                            in_node,
+                            self.current_node_id,
+                        )
+                        self.g.es[new_edge_idx]['way_point'] = self.g.es[inedge_idx]['way_point']
                     # second we build out edge and move the waypoint to it
 
                     for outedge_idx in connected_outedge_list:
@@ -122,8 +199,11 @@ class Topomap_construction():
                             self.g.vs[self.current_node_id]['room_entry'].remove(self.g.es[outedge_idx]['way_point'])
                             #break
                             continue
-                        self.g.add_edges([[self.current_node_id, out_node]])
-                        self.g.es[self.g.ecount()-1]['way_point'] = self.g.es[outedge_idx]['way_point']
+                        new_edge_idx = self._add_edge(
+                            self.current_node_id,
+                            out_node,
+                        )
+                        self.g.es[new_edge_idx]['way_point'] = self.g.es[outedge_idx]['way_point']
                     if self_loop:
                         loop_waypoint_list = []  # remove those doors do not enclose and found during further exploration
                         for node_entry in self.g.vs[target_node_idx]['room_entry']:
@@ -231,8 +311,9 @@ class Topomap_construction():
                 current_node_id=self.current_node_id,
                 bot_location=bot_loc,
             )
-        try:
-            room_entry = self.g.vs[self.current_node_id]['room_entry'][0].copy()
+        room_entries = self.g.vs[self.current_node_id]['room_entry']
+        if room_entries:
+            room_entry = room_entries[0].copy()
             room_entry.reverse()
             _, _, _, current_node_exp_list, door_grid = self.frontier_detector.frontier_detection(np.array(room_entry),
                                                                                     np.array(bot_loc),
@@ -240,8 +321,15 @@ class Topomap_construction():
                                                                                     lmb,
                                                                                     detected_door_list,
                                                                                                   laser_list)
-        except:
+        elif self.current_node_id == 0 and self.v_num == 1:
+            # The initial room has no door-derived entry until the first edge exists.
             current_node_exp_list = room_exp_list
+        else:
+            raise RuntimeError(
+                "Non-root topology node {} has no room entry".format(
+                    self.current_node_id
+                )
+            )
         #print(current_node_exp_list)
         self.g.vs[self.current_node_id]['room_exp'] = current_node_exp_list.copy()
         for door_pix in door_grid:
@@ -250,11 +338,10 @@ class Topomap_construction():
         for i in range(self.g.vcount()):
             room_label = i+1
             room_exp_list_ = self.g.vs[i]['room_exp']
-            try:
-                for j in room_exp_list_:
-                    tmp_show_map[j[0], j[1]] = room_label
-            except:
-                pass
+            if not isinstance(room_exp_list_, list):
+                raise TypeError("Topology room_exp must be a list")
+            for j in room_exp_list_:
+                tmp_show_map[j[0], j[1]] = room_label
         
 
         """plt.ion()
@@ -321,7 +408,7 @@ class Topomap_construction():
             #current_location.reverse()  # convert to [x, y]
             new_v = len(door_list)
             #self.vertice.extend(vertice)
-            self.g.add_vertices(new_v)
+            self._add_rooms(new_v)
             cross_node_idx = 0
             tmp_current_node_idx_store = self.current_node_id
             if cross_flag_exist:
@@ -356,8 +443,7 @@ class Topomap_construction():
                 #if cross_flag_exist and i != cross_node_idx:
                 #    self.g.add_edges([[cross_node_idx, i]])
                 #else:
-                self.g.add_edges([[self.current_node_id, i]])
-                edge_idx = self.g.ecount() - 1
+                edge_idx = self._add_edge(self.current_node_id, i)
                 take_way_1 = False
                 take_way_2 = False
                 print(door)
@@ -390,8 +476,7 @@ class Topomap_construction():
                 #if cross_flag_exist and i != cross_node_idx:
                 #    self.g.add_edges([[i, cross_node_idx]])
                 #else:
-                self.g.add_edges([[i, self.current_node_id]])
-                edge_idx = self.g.ecount() - 1
+                edge_idx = self._add_edge(i, self.current_node_id)
                 if take_way_1:
                     self.g.es[edge_idx]['way_point'] = way_point_2
                 if take_way_2:
@@ -601,6 +686,12 @@ class Topomap_construction():
             self.pending_transition = {
                 "source_node_id": int(previous_node_id),
                 "target_node_id": int(self.current_node_id),
+                "source_node_stable_id": int(
+                    self.g.vs[previous_node_id]["stable_id"]
+                ),
+                "target_node_stable_id": int(
+                    self.g.vs[self.current_node_id]["stable_id"]
+                ),
                 "selected_from_xy": self._plain(current_location),
                 "segments": segments,
             }
@@ -622,6 +713,7 @@ class Topomap_construction():
         return goal  # goal is list of [x,y] global frame unit is pix
 
     def _transition_segment(self, edge_idx):
+        self._validate_stable_ids()
         source_node_id, target_node_id = self.g.es[edge_idx].tuple
         source_waypoint = None
         for reverse_edge_idx in self.g.incident(target_node_id, mode='out'):
@@ -634,8 +726,15 @@ class Topomap_construction():
                 break
         return {
             "edge_id": int(edge_idx),
+            "edge_stable_id": int(self.g.es[edge_idx]["stable_id"]),
             "source_node_id": int(source_node_id),
             "target_node_id": int(target_node_id),
+            "source_node_stable_id": int(
+                self.g.vs[source_node_id]["stable_id"]
+            ),
+            "target_node_stable_id": int(
+                self.g.vs[target_node_id]["stable_id"]
+            ),
             "source_waypoint": self._plain(source_waypoint),
             "target_waypoint": self._plain(
                 self.g.es[edge_idx]["way_point"]
@@ -657,6 +756,8 @@ class Topomap_construction():
         evidence = {
             "source_node_id": pending["source_node_id"],
             "target_node_id": pending["target_node_id"],
+            "source_node_stable_id": pending["source_node_stable_id"],
+            "target_node_stable_id": pending["target_node_stable_id"],
             "planned_segment_count": len(planned_segments),
             "reached_exit_count": int(reached_exit_count),
             "segments": [],
@@ -669,6 +770,11 @@ class Topomap_construction():
         for segment_index, planned in enumerate(planned_segments):
             segment_evidence = {
                 "edge_id": planned["edge_id"],
+                "edge_stable_id": planned["edge_stable_id"],
+                "source_node_id": planned["source_node_id"],
+                "target_node_id": planned["target_node_id"],
+                "source_node_stable_id": planned["source_node_stable_id"],
+                "target_node_stable_id": planned["target_node_stable_id"],
                 "source_waypoint": planned["source_waypoint"],
                 "target_waypoint": planned["target_waypoint"],
                 "confirmed": False,
@@ -735,13 +841,15 @@ class Topomap_construction():
                 snapshot=self.snapshot(),
             )
         else:
-            source_node_id = pending["source_node_id"]
-            target_node_id = pending["target_node_id"]
-            if 0 <= target_node_id < self.g.vcount():
-                self.g.vs[target_node_id]["room_status"] = "unexplored"
-            if 0 <= source_node_id < self.g.vcount():
-                self.current_node_id = source_node_id
-                self.g.vs[source_node_id]["room_status"] = "exploring"
+            source_node_id = self._node_index_for_stable_id(
+                pending["source_node_stable_id"]
+            )
+            target_node_id = self._node_index_for_stable_id(
+                pending["target_node_stable_id"]
+            )
+            self.g.vs[target_node_id]["room_status"] = "unexplored"
+            self.current_node_id = source_node_id
+            self.g.vs[source_node_id]["room_status"] = "exploring"
             self._emit(
                 "door_crossing_geometry_rejected",
                 evidence=evidence,
@@ -778,6 +886,9 @@ class Topomap_construction():
 
     def use_exist_topomap(self, topomap):
         self.g = topomap
+        room_stable_ids, edge_stable_ids = self._validate_stable_ids()
+        self.next_room_stable_id = max(room_stable_ids, default=-1) + 1
+        self.next_edge_stable_id = max(edge_stable_ids, default=-1) + 1
         self.use_topo = True
         self.v_num = self.g.vcount()
         self.current_node_id = min(self.current_node_id, max(0, self.v_num - 1))

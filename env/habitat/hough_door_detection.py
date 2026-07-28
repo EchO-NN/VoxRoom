@@ -31,7 +31,7 @@ def hough_detection(src):
 
     lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold)
 
-    try:
+    if lines is not None:
         for line in lines:
             rho = line[0][0]
             theta = line[0][1]
@@ -48,8 +48,6 @@ def hough_detection(src):
 
             #cv2.line(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
             cv2.line(line_mask, (x1, y1), (x2, y2), 1, 5)
-    except:
-        pass
 
     #    cv2.imshow(WindowName, img)
     #    k = cv2.waitKey(1) & 0xFF
@@ -392,10 +390,8 @@ def convert_2_laser_gomez(obs_map, exp_map, agent_pose, gt_door_map): # agent_po
             # geo_size >= 0.8 * 100 / 5 and geo_size <= 2.4 * 100 / 5
             result_door_list.append([mid_point, info_size, f_point])
             for door_grid in door:
-                try:
+                if door_grid in full_length_list:
                     full_length_list.remove(door_grid)
-                except:
-                    pass
         else:
             print('removed for incorrect size {}!!!!!!!!!'.format(geo_size*5/100))
 

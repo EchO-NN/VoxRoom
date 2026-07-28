@@ -60,8 +60,32 @@ SCENE_ID=Swormville MAX_EPISODE_STEPS=2500 \
   scripts/run_gibson_visual.sh
 ```
 
-Before launching, it verifies the official PointNav inventory, every referenced
-GLB/navmesh pair, the selected episode's navigability and recorded geodesic
-distance. It then writes a one-episode dataset derived from the official
-validation split and runs the same strict live visualization and artifact
-validator. It never downloads, substitutes, or regenerates Gibson assets.
+Before launching, it verifies the accepted 10.83 GB archive SHA256, the complete
+492-scene GLB/navmesh inventory, the 403 MB PointNav tree SHA256, every
+referenced scene pair, and the selected episode's navigability and recorded
+geodesic distance. The selected extracted GLB and navmesh must match their
+archive entries byte for byte. It then writes a deterministic one-episode
+dataset derived from the official validation split into an immutable run-ID
+scope and copies that dataset plus its manifest into the run directory before
+starting. Habitat reads that run-local dataset directly; there is no shared
+mutable generated-dataset path in the execution chain. After Habitat loads the
+episode, the runner recomputes a canonical contract digest over its start pose,
+rotation, goals, navigation info, room and shortest-path fields.
+
+`MAX_EPISODE_STEPS` is a hard upper bound. The Gibson entry point ends as soon
+as topology exploration completes instead of padding the episode with repeated
+turns. Strict door-crossing validation cannot be disabled for this entry point.
+The validator binds the episode, scene and asset hashes to the result, checks
+the complete dashboard-frame cadence, and monitors the process-owned physical
+X11 client ID, PID and title until shutdown. The presence of the Gibson context
+artifacts automatically enables strict validation: run and validator commits
+must match, natural topology completion must be explicit, and aborted
+exploration cannot be reported as success. A terminal dashboard render is
+mandatory, including a cadence-aligned final frame. Physical-window pixels are
+captured periodically and through an explicit terminal handshake; all four
+dashboard panels must remain nonblank and change from the first to terminal
+capture. Strict success also requires a confirmed crossing edge to survive in
+the final topology. Runtime evidence pins the DETR checkout, door-weight hash,
+Habitat/SG-Nav checkout and CUDA environment before and after the episode.
+The script never downloads,
+substitutes, regenerates or falls back to different Gibson assets.

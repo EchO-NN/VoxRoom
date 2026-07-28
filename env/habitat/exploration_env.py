@@ -23,6 +23,7 @@ else:
 import matplotlib.pyplot as plt
 
 import habitat
+from run_context_contract import episode_contract_sha256
 from habitat import logger
 from habitat.sims.habitat_simulator.actions import HabitatSimActions
 
@@ -189,6 +190,10 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         # Initialize variables
         self.scene_name = self._current_scene_id()
+        self.episode_id = str(self.habitat_env.current_episode.episode_id)
+        self.episode_contract_sha256 = episode_contract_sha256(
+            self.habitat_env.current_episode
+        )
         self.visited = np.zeros(self.map.shape)
         self.visited_vis = np.zeros(self.map.shape)
         self.visited_gt = np.zeros(self.map.shape)
@@ -204,6 +209,8 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             'pose_err': [0., 0., 0.],
         }
         self.info['scene_name'] = self.scene_name
+        self.info['episode_id'] = self.episode_id
+        self.info['episode_contract_sha256'] = self.episode_contract_sha256
 
 
         self.save_position()
@@ -309,6 +316,8 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['pano_map'] = pano_map
         self.info['pano_exp'] = pano_exp
         self.info['scene_name'] = self.scene_name
+        self.info['episode_id'] = self.episode_id
+        self.info['episode_contract_sha256'] = self.episode_contract_sha256
         self.info['door_obs_map'] = door_map
         self.info['door_detection'] = vis_result
         self.info['door_local_map'] = door_only_map

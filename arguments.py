@@ -5,6 +5,35 @@ from pathlib import Path
 import torch
 
 
+TASK_CONFIG_ROOT = (
+    Path(__file__).resolve().parent
+    / "env"
+    / "habitat"
+    / "habitat_api"
+    / "configs"
+).resolve()
+
+
+def canonical_task_config(value):
+    task_config = Path(value)
+    if task_config.is_absolute():
+        raise ValueError("Task config must be relative to the config root")
+    resolved = (TASK_CONFIG_ROOT / task_config).resolve()
+    try:
+        canonical = resolved.relative_to(TASK_CONFIG_ROOT).as_posix()
+    except ValueError as error:
+        raise ValueError("Task config resolves outside the config root") from error
+    if canonical != value:
+        raise ValueError(
+            "Task config must use its canonical relative path: {}".format(
+                canonical
+            )
+        )
+    if not resolved.is_file():
+        raise FileNotFoundError("Task config does not exist: {}".format(resolved))
+    return canonical
+
+
 def get_args():
     parser = argparse.ArgumentParser(description='Active-Neural-SLAM')
 
@@ -75,11 +104,24 @@ def get_args():
         help='GUI event-loop pause after each dashboard refresh',
     )
     parser.add_argument(
+        '--window_checkpoint_every_steps',
+        type=int,
+        default=0,
+        help='physical X11 checkpoint handshake interval',
+    )
+    parser.add_argument(
         '--require_topology_transition',
         type=int,
         choices=(0, 1),
         default=0,
         help='fail the run unless a door crossing is confirmed',
+    )
+    parser.add_argument(
+        '--pad_episode_to_max_steps',
+        type=int,
+        choices=(0, 1),
+        default=1,
+        help='continue control steps after topology exploration completes',
     )
     parser.add_argument('--save_trajectory_data', type=str, default="0")
     parser.add_argument(
@@ -87,6 +129,18 @@ def get_args():
         type=str,
         default="./tmp/active_room_segmentation",
         help='directory for the machine-readable run summary',
+    )
+    parser.add_argument(
+        '--run_context_manifest',
+        type=str,
+        default='',
+        help='immutable prepared-input manifest copied into the run directory',
+    )
+    parser.add_argument(
+        '--run_context_dataset',
+        type=str,
+        default='',
+        help='immutable one-episode dataset copied into the run directory',
     )
     parser.add_argument(
         '--detector_device',
@@ -216,9 +270,18 @@ def get_args():
 
     # parse arguments
     args = parser.parse_args()
+    args.task_config = canonical_task_config(args.task_config)
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     args.detr_source_dir = str(Path(args.detr_source_dir).expanduser().resolve())
     args.run_dir = str(Path(args.run_dir).expanduser().resolve())
+    if args.run_context_manifest:
+        args.run_context_manifest = str(
+            Path(args.run_context_manifest).expanduser().resolve()
+        )
+    if args.run_context_dataset:
+        args.run_context_dataset = str(
+            Path(args.run_context_dataset).expanduser().resolve()
+        )
     os.environ["ACTIVE_ROOM_DETR_DIR"] = args.detr_source_dir
     os.environ["ACTIVE_ROOM_DETECTOR_DEVICE"] = args.detector_device
 

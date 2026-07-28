@@ -1,8 +1,11 @@
 import time
 from collections import deque
+import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import uuid
 import cv2
@@ -34,6 +37,8 @@ from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
 from time import perf_counter, time
 from visualization import RuntimeDashboard, TopologyEventRecorder
+from run_context_contract import episode_contract_sha256
+from topology_contract import surviving_crossing_count
 
 def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
     loc_r, loc_c = agent_loc
@@ -73,6 +78,179 @@ def write_json_atomic(path, payload):
         output.flush()
         os.fsync(output.fileno())
     os.replace(temporary_path, path)
+
+
+def bind_x11_client_window(figure, window_title):
+    manager = figure.canvas.manager
+    window = getattr(manager, "window", None)
+    if window is None or not hasattr(window, "winfo_id"):
+        raise RuntimeError("The live dashboard is not backed by a Tk X11 window")
+    manager.set_window_title(window_title)
+    figure.canvas.draw()
+    manager.show()
+    window.update_idletasks()
+    window.update()
+    inner_window_id = int(window.winfo_id())
+    if inner_window_id <= 0:
+        raise RuntimeError("Tk did not expose a valid X11 client window ID")
+    inner_window_id_hex = "0x{:x}".format(inner_window_id)
+    window_tree = subprocess.check_output(
+        ["xwininfo", "-id", inner_window_id_hex, "-tree"],
+        text=True,
+        timeout=10,
+    )
+    parent_match = re.search(
+        r"Parent window id: (0x[0-9a-fA-F]+)",
+        window_tree,
+    )
+    if parent_match is None:
+        raise RuntimeError("Unable to resolve the Tk X11 client window")
+    window_id_hex = parent_match.group(1).lower()
+    subprocess.run(
+        [
+            "xprop",
+            "-id",
+            window_id_hex,
+            "-f",
+            "_NET_WM_PID",
+            "32c",
+            "-set",
+            "_NET_WM_PID",
+            str(os.getpid()),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    pid_property = subprocess.check_output(
+        ["xprop", "-id", window_id_hex, "_NET_WM_PID"],
+        text=True,
+        timeout=10,
+    )
+    try:
+        observed_pid = int(pid_property.rsplit(" = ", 1)[1].strip())
+    except (IndexError, ValueError) as error:
+        raise RuntimeError("Unable to parse the X11 client PID property") from error
+    if observed_pid != os.getpid():
+        raise RuntimeError("The live X11 client window is not owned by this process")
+    window_properties = subprocess.check_output(
+        ["xprop", "-id", window_id_hex, "WM_NAME"],
+        text=True,
+        timeout=10,
+    )
+    if window_properties.strip() != 'WM_NAME(STRING) = "{}"'.format(window_title):
+        raise RuntimeError("The live X11 client window has the wrong title")
+    window_info = subprocess.check_output(
+        ["xwininfo", "-id", window_id_hex],
+        text=True,
+        timeout=10,
+    )
+    if "Map State: IsViewable" not in window_info:
+        raise RuntimeError("The live X11 client window is not viewable")
+    if str(window.wm_title()) != window_title:
+        raise RuntimeError("The live X11 client window title changed during binding")
+    return window_id_hex
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_run_context(run_dir):
+    manifest_argument = bool(args.run_context_manifest)
+    dataset_argument = bool(args.run_context_dataset)
+    if manifest_argument != dataset_argument:
+        raise RuntimeError(
+            "Run context manifest and dataset must be provided together"
+        )
+    if not manifest_argument:
+        return None
+
+    manifest_path = Path(args.run_context_manifest)
+    dataset_path = Path(args.run_context_dataset)
+    if (
+        manifest_path.parent != run_dir
+        or dataset_path.parent != run_dir
+        or manifest_path.name != "input_manifest.json"
+        or dataset_path.name != "input_dataset.json.gz"
+    ):
+        raise RuntimeError("Run context files are not scoped to the run directory")
+    if not manifest_path.is_file() or not dataset_path.is_file():
+        raise FileNotFoundError("Run context files are missing")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("format_version") != 1 or manifest.get("status") != "prepared":
+        raise RuntimeError("Unsupported or incomplete run context manifest")
+    dataset_digest = sha256(dataset_path)
+    if dataset_digest != manifest.get("output_dataset_sha256"):
+        raise RuntimeError("Run context dataset SHA256 mismatch")
+    repository_root = Path(__file__).resolve().parent
+    source_dataset = Path(manifest["output_dataset"]).resolve()
+    prepared_root = (
+        repository_root / "data" / "gibson-visual-runs"
+    ).resolve()
+    if (
+        source_dataset.parent.parent != prepared_root
+        or source_dataset.name != "input_dataset.json.gz"
+    ):
+        raise RuntimeError("Prepared dataset resolves outside its run scope")
+    if (
+        not source_dataset.is_file()
+        or sha256(source_dataset) != dataset_digest
+    ):
+        raise RuntimeError("Prepared source dataset differs from the run copy")
+    scene_path = Path(manifest["scene_path"]).resolve()
+    navmesh_path = Path(manifest["navmesh_path"]).resolve()
+    expected_scene_root = (
+        repository_root / "data" / "scene_datasets" / "gibson"
+    ).resolve()
+    if (
+        scene_path.parent != expected_scene_root
+        or navmesh_path.parent != expected_scene_root
+        or scene_path.stem != manifest.get("scene_id")
+        or scene_path.suffix != ".glb"
+        or navmesh_path != scene_path.with_suffix(".navmesh")
+    ):
+        raise RuntimeError("Run context assets resolve outside the Gibson scene root")
+    if sha256(scene_path) != manifest.get("scene_sha256"):
+        raise RuntimeError("Active Gibson scene differs from run context")
+    if sha256(navmesh_path) != manifest.get("navmesh_sha256"):
+        raise RuntimeError("Active Gibson navmesh differs from run context")
+
+    with gzip.open(dataset_path, "rt", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    episodes = payload.get("episodes", [])
+    if len(episodes) != 1:
+        raise RuntimeError("Run context must contain exactly one episode")
+    episode = episodes[0]
+    if str(episode.get("episode_id")) != manifest.get("selected_episode_id"):
+        raise RuntimeError("Run context episode ID mismatch")
+    if Path(episode.get("scene_id", "")).stem != manifest.get("scene_id"):
+        raise RuntimeError("Run context scene ID mismatch")
+    episode_digest = episode_contract_sha256(episode)
+    if episode_digest != manifest.get("selected_episode_contract_sha256"):
+        raise RuntimeError("Run context episode contract SHA256 mismatch")
+
+    return {
+        "manifest_file": manifest_path.name,
+        "manifest_sha256": sha256(manifest_path),
+        "dataset_file": dataset_path.name,
+        "dataset_sha256": dataset_digest,
+        "scene_id": manifest["scene_id"],
+        "episode_id": manifest["selected_episode_id"],
+        "episode_contract_sha256": episode_digest,
+        "scene_sha256": manifest["scene_sha256"],
+        "navmesh_sha256": manifest["navmesh_sha256"],
+        "archive_sha256": manifest["archive_sha256"],
+        "pointnav_tree_sha256": manifest["pointnav_tree_sha256"],
+        "geodesic_distance": manifest["selected_episode_geodesic_distance"],
+    }
 
 
 explorable_threshold = 3.15
@@ -181,32 +359,66 @@ def main():
     source_commit = subprocess.check_output(
         ["git", "-C", str(source_root), "rev-parse", "HEAD"],
         text=True,
+        timeout=30,
     ).strip()
     source_changes = subprocess.check_output(
         ["git", "-C", str(source_root), "status", "--porcelain"],
         text=True,
+        timeout=30,
     ).strip()
     if source_changes:
         raise RuntimeError("Refusing to run from a dirty source tree")
+    run_context = load_run_context(run_dir)
+    if (
+        args.task_config == "tasks/pointnav_gibson_visual.yaml"
+        and run_context is None
+    ):
+        raise RuntimeError("The Gibson visual task requires a run context")
+    runtime_install_path = run_dir / "runtime_install.json"
+    if not runtime_install_path.is_file():
+        raise FileNotFoundError("Runtime installation evidence is missing")
+    runtime_install_sha256 = sha256(runtime_install_path)
+    if run_context is not None:
+        if args.task_config != "tasks/pointnav_gibson_visual.yaml":
+            raise RuntimeError("Gibson run context requires the pinned task config")
+        if args.split != "val":
+            raise RuntimeError("Gibson run context requires the val split")
+        if not args.require_topology_transition:
+            raise RuntimeError("Gibson run context requires topology transitions")
+        if args.pad_episode_to_max_steps:
+            raise RuntimeError("Gibson run context forbids episode-tail padding")
+        if not args.visualize:
+            raise RuntimeError("Gibson run context requires the live dashboard")
+        if args.visualization_frame_every_steps != 5:
+            raise RuntimeError("Gibson run context requires five-step frame cadence")
+        if args.window_checkpoint_every_steps != 100:
+            raise RuntimeError(
+                "Gibson run context requires 100-step X11 checkpoints"
+            )
     started_at = time()
-    write_json_atomic(
-        run_dir / "run_metadata.json",
-        {
-            "run_id": args.run_id,
-            "process_id": os.getpid(),
-            "started_at_unix": started_at,
-            "requested_max_episode_steps": int(args.max_episode_length),
-            "source_commit": source_commit,
-            "detector_device": args.detector_device,
-            "detr_source_dir": args.detr_source_dir,
-            "visualization": bool(args.visualize),
-            "window_title": args.window_title,
-            "visualization_frame_every_steps": int(
-                args.visualization_frame_every_steps
-            ),
-            "require_topology_transition": bool(args.require_topology_transition),
-        },
-    )
+    run_metadata = {
+        "run_id": args.run_id,
+        "process_id": os.getpid(),
+        "started_at_unix": started_at,
+        "requested_max_episode_steps": int(args.max_episode_length),
+        "source_commit": source_commit,
+        "detector_device": args.detector_device,
+        "detr_source_dir": args.detr_source_dir,
+        "visualization": bool(args.visualize),
+        "window_title": args.window_title,
+        "visualization_frame_every_steps": int(
+            args.visualization_frame_every_steps
+        ),
+        "window_checkpoint_every_steps": int(
+            args.window_checkpoint_every_steps
+        ),
+        "require_topology_transition": bool(args.require_topology_transition),
+        "pad_episode_to_max_steps": bool(args.pad_episode_to_max_steps),
+        "task_config": args.task_config,
+        "split": args.split,
+        "runtime_install_sha256": runtime_install_sha256,
+        "run_context": run_context,
+    }
 
     event_recorder = TopologyEventRecorder(
         run_dir / "topology_events.jsonl",
@@ -218,8 +430,12 @@ def main():
         "phase": "initializing",
         "action": "none",
         "topology_exploration_complete_step": None,
+        "completion_reason": None,
+        "last_dashboard_info": None,
+        "last_dashboard_absolute_locs": None,
     }
     runtime_timings = {}
+    confirmed_crossing_evidence = []
 
     def accumulate_timing(name, duration):
         duration = float(duration)
@@ -251,11 +467,16 @@ def main():
         }
 
     def record_event(event_type, **payload):
-        return event_recorder.record(
+        event = event_recorder.record(
             event_type,
             action_count,
             **payload,
         )
+        if event_type == "door_crossing_confirmed":
+            confirmed_crossing_evidence.append(
+                json.loads(json.dumps(payload["evidence"]))
+            )
+        return event
 
     def set_runtime_phase(phase, action="none"):
         runtime_state["phase"] = str(phase)
@@ -277,6 +498,10 @@ def main():
             "step": int(step),
             "simulator_step": int(info["time"]),
             "scene_name": str(info.get("scene_name", "")),
+            "episode_id": str(info.get("episode_id", "")),
+            "episode_contract_sha256": str(
+                info.get("episode_contract_sha256", "")
+            ),
             "explored_ratio": float(info.get("exp_ratio") or 0.0),
             "explored_reward": float(info.get("exp_reward") or 0.0),
             "phase": runtime_state["phase"],
@@ -333,7 +558,28 @@ def main():
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
     obs, infos = envs.reset()
+    actual_episode_id = str(infos[0].get("episode_id", ""))
+    actual_episode_contract_sha256 = str(
+        infos[0].get("episode_contract_sha256", "")
+    )
+    actual_scene_id = Path(infos[0].get("scene_name", "")).stem
+    if (
+        not actual_episode_id
+        or not actual_scene_id
+        or len(actual_episode_contract_sha256) != 64
+    ):
+        raise RuntimeError("Habitat did not expose the active episode identity")
+    if run_context is not None and (
+        actual_episode_id != run_context["episode_id"]
+        or actual_scene_id != run_context["scene_id"]
+        or actual_episode_contract_sha256
+        != run_context["episode_contract_sha256"]
+    ):
+        raise RuntimeError("Habitat loaded an episode outside the run context")
+    if run_context is not None and load_run_context(run_dir) != run_context:
+        raise RuntimeError("Run context changed while Habitat loaded the episode")
     dashboard = None
+    x11_client_window_id = None
     if args.visualize or args.print_images:
         live_figure = plt.figure(num=args.window_title, figsize=(16, 9))
         dashboard = RuntimeDashboard(
@@ -342,6 +588,19 @@ def main():
             frame_every_steps=args.visualization_frame_every_steps,
             refresh_seconds=args.visualization_refresh_seconds,
         )
+        x11_client_window_id = bind_x11_client_window(
+            live_figure,
+            args.window_title,
+        )
+    run_metadata.update(
+        {
+            "actual_episode_id": actual_episode_id,
+            "actual_episode_contract_sha256": actual_episode_contract_sha256,
+            "actual_scene_id": actual_scene_id,
+            "x11_client_window_id": x11_client_window_id,
+        }
+    )
+    write_json_atomic(run_dir / "run_metadata.json", run_metadata)
 
     # Initialize map variables
     ### Full map consists of 4 channels containing the following:
@@ -433,6 +692,10 @@ def main():
         def render_dashboard(info, absolute_locs, goal_xy=None, frontiers=None):
             if dashboard is None:
                 return
+            runtime_state["last_dashboard_info"] = info
+            runtime_state["last_dashboard_absolute_locs"] = np.asarray(
+                absolute_locs
+            ).copy()
             agent_xy = (
                 float(absolute_locs[1] * 100.0 / args.map_resolution),
                 float(absolute_locs[0] * 100.0 / args.map_resolution),
@@ -471,6 +734,42 @@ def main():
                 },
                 events=event_recorder.latest_events(),
             )
+            if (
+                run_context is not None
+                and action_count > 0
+                and action_count % args.window_checkpoint_every_steps == 0
+            ):
+                checkpoint_dir = run_dir / "window_checkpoints"
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                checkpoint_label = "{:06d}".format(action_count)
+                ready_path = checkpoint_dir / (
+                    "ready_{}.json".format(checkpoint_label)
+                )
+                ack_path = checkpoint_dir / (
+                    "ack_{}.txt".format(checkpoint_label)
+                )
+                if not ack_path.is_file():
+                    write_json_atomic(
+                        ready_path,
+                        {
+                            "run_id": args.run_id,
+                            "process_id": os.getpid(),
+                            "window_id": x11_client_window_id,
+                            "step": action_count,
+                        },
+                    )
+                    checkpoint_deadline = time() + 120.0
+                    while not ack_path.is_file():
+                        if time() >= checkpoint_deadline:
+                            raise TimeoutError(
+                                "Timed out waiting for X11 checkpoint capture"
+                            )
+                        live_figure.canvas.flush_events()
+                        plt.pause(0.05)
+                if ack_path.read_text(encoding="utf-8").strip() != args.run_id:
+                    raise RuntimeError(
+                        "X11 checkpoint capture acknowledgement mismatch"
+                    )
 
         def generate_12_parts(agent_pose):
             x = agent_pose[1]  # x and y unit is m and presented in local frame
@@ -1125,11 +1424,11 @@ def main():
 
                     final_goal = in_point - origins[0, :2] * 100 / args.map_resolution
                     final_goal = final_goal.astype(int).tolist()
-                try:
-                    last_goal = final_goal.copy()
-
-                except:
-                    last_goal = None
+                last_goal = (
+                    final_goal.copy()
+                    if final_goal is not None
+                    else None
+                )
                 #print('cov_ ration {}'.format(cov_ratio))
                 #if cov_ratio > 0.99:
                 #    final_goal = None  # only use this during pure frontier method, prevent stuck
@@ -1368,6 +1667,16 @@ def main():
             global t_start
             t_start = time()
 
+            def abort(reason):
+                runtime_state["completion_reason"] = str(reason)
+                set_runtime_phase("aborted", reason)
+                record_event("exploration_aborted", reason=reason)
+                raise RuntimeError(
+                    "Topology exploration aborted before completion: {}".format(
+                        reason
+                    )
+                )
+
             print('locs in exp {}'.format(locs))
             # auto exploration stage
 
@@ -1378,7 +1687,7 @@ def main():
             locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)  # long term goal is under local frame
 
             if not locs.any():
-                return None
+                abort("initial_scan_exhausted")
             print('first long term goal {}'.format(long_term_goal))
             first_flag = False
             print(topo.stop_exp())
@@ -1387,7 +1696,7 @@ def main():
                 # first searching the current room
                 locs, stg, long_term_goal = room_searching(locs, stg, long_term_goal, first_flag, whether_returning)
                 if not locs.any():
-                    return None
+                    abort("room_search_exhausted")
                 # here is the room to room moving part
                 (
                     locs,
@@ -1403,11 +1712,11 @@ def main():
                     first_flag,
                 )
                 if not locs.any():
-                    return None
+                    abort("room_transition_exhausted")
                 set_runtime_phase("transition_confirmation_scan")
                 locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)
                 if not locs.any():
-                    return None
+                    abort("transition_confirmation_scan_exhausted")
                 transition_confirmed, transition_evidence = (
                     topo.confirm_pending_transition(
                         transition_trajectories,
@@ -1443,30 +1752,50 @@ def main():
             t_end = time()
             print('time cost {}'.format(t_end-t_start))
             runtime_state["topology_exploration_complete_step"] = action_count
+            runtime_state["completion_reason"] = "topology_exploration_completed"
             set_runtime_phase("topology_complete")
             record_event(
                 "topology_exploration_completed",
                 topology=topo.snapshot(),
                 elapsed_seconds=t_end - t_start,
             )
-            set_runtime_phase("episode_tail")
-            while action_count < args.max_episode_length-1:
-                locs, stg, long_term_goal, _ = take_action(0, locs, first_flag, [args.map_size_cm / 20, args.map_size_cm / 20])
-
-            locs, stg, long_term_goal, _ = take_action(0, locs, False, [args.map_size_cm / 20, args.map_size_cm / 20])
-            # take one more step to activate the new map
-            #print('action_in total {}'.format(action_count))
+            if args.pad_episode_to_max_steps:
+                set_runtime_phase("episode_tail")
+                while action_count < args.max_episode_length:
+                    locs, stg, long_term_goal, _ = take_action(
+                        0,
+                        locs,
+                        first_flag,
+                        [
+                            args.map_size_cm / 20,
+                            args.map_size_cm / 20,
+                        ],
+                    )
             set_runtime_phase("completed")
             record_event("episode_control_completed", executed_steps=action_count)
+            return runtime_state["completion_reason"]
 
-        exploration(locs)
+        completion_reason = exploration(locs)
+        if completion_reason != "topology_exploration_completed":
+            raise RuntimeError("Exploration returned without a completion reason")
 
         topology_snapshot = topo.snapshot()
         record_event(
             "run_completed",
             executed_steps=int(last_episode_action_count or action_count),
+            completion_reason=completion_reason,
             topology=topology_snapshot,
         )
+        if dashboard is not None:
+            if (
+                runtime_state["last_dashboard_info"] is None
+                or runtime_state["last_dashboard_absolute_locs"] is None
+            ):
+                raise RuntimeError("The live dashboard never rendered a control step")
+            render_dashboard(
+                runtime_state["last_dashboard_info"],
+                runtime_state["last_dashboard_absolute_locs"],
+            )
         event_summary = event_recorder.summary()
         topology_transition_count = int(
             event_summary["event_counts"].get("room_transition_confirmed", 0)
@@ -1474,7 +1803,11 @@ def main():
         door_crossing_count = int(
             event_summary["event_counts"].get("door_crossing_confirmed", 0)
         )
-        if topology_transition_count > 0 and door_crossing_count > 0:
+        surviving_door_crossing_count = surviving_crossing_count(
+            confirmed_crossing_evidence,
+            topology_snapshot,
+        )
+        if topology_transition_count > 0 and surviving_door_crossing_count > 0:
             topology_status = "cross_room_verified"
         elif topology_snapshot["edge_count"] > 0:
             topology_status = "topology_built_no_confirmed_crossing"
@@ -1484,15 +1817,23 @@ def main():
             "run_id": args.run_id,
             "process_id": os.getpid(),
             "source_commit": source_commit,
+            "actual_episode_id": actual_episode_id,
+            "actual_episode_contract_sha256": actual_episode_contract_sha256,
+            "actual_scene_id": actual_scene_id,
+            "task_config": args.task_config,
+            "split": args.split,
+            "runtime_install_sha256": runtime_install_sha256,
+            "completion_reason": completion_reason,
             "status": topology_status,
             "transition_count": topology_transition_count,
             "door_crossing_count": door_crossing_count,
+            "surviving_door_crossing_count": surviving_door_crossing_count,
             "require_topology_transition": bool(args.require_topology_transition),
             "requirement_met": (
                 not bool(args.require_topology_transition)
                 or (
                     topology_transition_count > 0
-                    and door_crossing_count > 0
+                    and surviving_door_crossing_count > 0
                 )
             ),
             "topology_exploration_complete_step": runtime_state[
@@ -1508,11 +1849,9 @@ def main():
             else {"frame_count": 0}
         )
         executed_steps = int(last_episode_action_count or action_count)
-        topology_complete_step = (
-            runtime_state["topology_exploration_complete_step"]
-            if runtime_state["topology_exploration_complete_step"] is not None
-            else executed_steps
-        )
+        topology_complete_step = runtime_state["topology_exploration_complete_step"]
+        if topology_complete_step is None:
+            raise RuntimeError("Topology completion step was not recorded")
         summary = {
             "status": "completed",
             "run_id": args.run_id,
@@ -1520,9 +1859,17 @@ def main():
             "started_at_unix": started_at,
             "finished_at_unix": time(),
             "scene_name": scene_name,
+            "episode_id": actual_episode_id,
+            "episode_contract_sha256": actual_episode_contract_sha256,
             "requested_max_episode_steps": int(args.max_episode_length),
             "source_commit": source_commit,
             "executed_steps": executed_steps,
+            "completion_reason": completion_reason,
+            "pad_episode_to_max_steps": bool(args.pad_episode_to_max_steps),
+            "require_topology_transition": bool(args.require_topology_transition),
+            "task_config": args.task_config,
+            "split": args.split,
+            "runtime_install_sha256": runtime_install_sha256,
             "explored_ratio": float(last_episode_cov_ratio or cov_ratio),
             "explored_area": float(last_episode_cov_area or cov_area),
             "visualization": bool(args.visualize),
@@ -1537,6 +1884,7 @@ def main():
             "topology_edge_count": topology_snapshot["edge_count"],
             "topology_transition_count": topology_transition_count,
             "door_crossing_count": door_crossing_count,
+            "surviving_door_crossing_count": surviving_door_crossing_count,
             "topology_requirement_met": topology_artifact["requirement_met"],
             "topology_exploration_steps": int(topology_complete_step),
             "episode_tail_steps": int(max(0, executed_steps - topology_complete_step)),
@@ -1546,8 +1894,35 @@ def main():
             ),
             "visualization_final": visualization_manifest.get("final_image"),
             "runtime_timing": timing_summary(),
+            "run_context": run_context,
+            "x11_client_window_id": x11_client_window_id,
         }
         write_json_atomic(run_dir / "result.json", summary)
+        if run_context is not None:
+            if live_figure is None or x11_client_window_id is None:
+                raise RuntimeError("Strict run has no terminal dashboard to capture")
+            terminal_ready_path = run_dir / "terminal_capture_ready.json"
+            terminal_ack_path = run_dir / "terminal_capture_ack.txt"
+            write_json_atomic(
+                terminal_ready_path,
+                {
+                    "run_id": args.run_id,
+                    "process_id": os.getpid(),
+                    "window_id": x11_client_window_id,
+                    "step": executed_steps,
+                    "completion_reason": completion_reason,
+                },
+            )
+            terminal_deadline = time() + 120.0
+            while not terminal_ack_path.is_file():
+                if time() >= terminal_deadline:
+                    raise TimeoutError(
+                        "Timed out waiting for the terminal dashboard capture"
+                    )
+                live_figure.canvas.flush_events()
+                plt.pause(0.05)
+            if terminal_ack_path.read_text(encoding="utf-8").strip() != args.run_id:
+                raise RuntimeError("Terminal dashboard capture acknowledgement mismatch")
         envs.close()
         plt.close("all")
 

@@ -22,11 +22,12 @@ class VisualReproductionTests(unittest.TestCase):
             events.append((event_type, payload))
 
         topology = Topomap_construction(map_size=32, event_callback=collect)
-        topology.g.add_vertices(1)
+        topology._add_rooms(1)
         topology.g.vs[1]["room_status"] = "unexplored"
         topology.g.vs[1]["room_entry"] = [[20, 10]]
         topology.g.vs[1]["room_exp"] = []
-        topology.g.add_edges([(0, 1), (1, 0)])
+        topology._add_edge(0, 1)
+        topology._add_edge(1, 0)
         topology.g.es[0]["way_point"] = [20, 10]
         topology.g.es[1]["way_point"] = [10, 20]
         topology.v_num = topology.g.vcount()
@@ -64,11 +65,12 @@ class VisualReproductionTests(unittest.TestCase):
                 (event_type, payload)
             ),
         )
-        topology.g.add_vertices(1)
+        topology._add_rooms(1)
         topology.g.vs[1]["room_status"] = "unexplored"
         topology.g.vs[1]["room_entry"] = [[20, 10]]
         topology.g.vs[1]["room_exp"] = []
-        topology.g.add_edges([(0, 1), (1, 0)])
+        topology._add_edge(0, 1)
+        topology._add_edge(1, 0)
         topology.g.es[0]["way_point"] = [20, 10]
         topology.g.es[1]["way_point"] = [10, 10]
         topology.v_num = topology.g.vcount()
@@ -101,11 +103,12 @@ class VisualReproductionTests(unittest.TestCase):
                 event_type
             ),
         )
-        topology.g.add_vertices(1)
+        topology._add_rooms(1)
         topology.g.vs[1]["room_status"] = "unexplored"
         topology.g.vs[1]["room_entry"] = [[20, 10]]
         topology.g.vs[1]["room_exp"] = []
-        topology.g.add_edges([(0, 1), (1, 0)])
+        topology._add_edge(0, 1)
+        topology._add_edge(1, 0)
         topology.g.es[0]["way_point"] = [20, 10]
         topology.g.es[1]["way_point"] = [10, 10]
         topology.v_num = topology.g.vcount()
@@ -123,6 +126,45 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertEqual(topology.g.vs[1]["room_status"], "unexplored")
         self.assertIn("door_crossing_geometry_rejected", events)
         self.assertNotIn("door_crossing_confirmed", events)
+
+    def test_transition_rejection_resolves_rooms_by_stable_id(self):
+        topology = Topomap_construction(map_size=32)
+        topology._add_rooms(2)
+        topology.g.vs[0]["room_status"] = "explored"
+        topology.g.vs[1]["room_status"] = "exploring"
+        topology.g.vs[1]["room_entry"] = [[10, 10]]
+        topology.g.vs[1]["room_exp"] = []
+        topology.g.vs[2]["room_status"] = "unexplored"
+        topology.g.vs[2]["room_entry"] = [[20, 10]]
+        topology.g.vs[2]["room_exp"] = []
+        topology._add_edge(1, 2)
+        topology._add_edge(2, 1)
+        topology.g.es[0]["way_point"] = [20, 10]
+        topology.g.es[1]["way_point"] = [10, 10]
+        topology.current_node_id = 1
+        topology.v_num = topology.g.vcount()
+
+        topology.choose_door([10, 10])
+        topology.g.delete_vertices(0)
+        topology.v_num = topology.g.vcount()
+        confirmed, _ = topology.confirm_pending_transition(
+            [[[16, 10], [20, 10]]],
+            reached_exit_count=1,
+        )
+
+        self.assertFalse(confirmed)
+        self.assertEqual(topology.current_node_id, 0)
+        self.assertEqual(topology.g.vs[0]["stable_id"], 1)
+        self.assertEqual(topology.g.vs[0]["room_status"], "exploring")
+        self.assertEqual(topology.g.vs[1]["stable_id"], 2)
+        self.assertEqual(topology.g.vs[1]["room_status"], "unexplored")
+
+    def test_missing_stable_id_fails_instead_of_being_backfilled(self):
+        topology = Topomap_construction(map_size=32)
+        topology.g.add_vertex()
+
+        with self.assertRaises(RuntimeError):
+            topology.snapshot()
 
     def test_dashboard_writes_frames_final_image_and_manifest(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

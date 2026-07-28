@@ -445,10 +445,9 @@ class Door_detection():
         return door_list_this_round, door_candidate_this_round#self.door_candidate
 
     def door_remove(self, door):
-        try:
-            self.door_list.remove(door)
-        except:
-            pass
+        if door not in self.door_list:
+            raise ValueError("Cannot remove a door that is not tracked")
+        self.door_list.remove(door)
 
     def door_presentation(self, door, corresponding_list):
         """

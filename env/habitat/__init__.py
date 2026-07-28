@@ -38,6 +38,8 @@ def construct_envs(args):
 
     basic_config.defrost()
     basic_config.DATASET.SPLIT = args.split
+    if args.run_context_dataset:
+        basic_config.DATASET.DATA_PATH = args.run_context_dataset
     basic_config.freeze()
 
     scenes = PointNavDatasetV1.get_scenes_to_load(basic_config.DATASET)
@@ -53,6 +55,8 @@ def construct_envs(args):
         config_env = cfg_env(config_paths=
                              ["env/habitat/habitat_api/configs/" + args.task_config])
         config_env.defrost()
+        if args.run_context_dataset:
+            config_env.DATASET.DATA_PATH = args.run_context_dataset
 
         if len(scenes) > 0:
             config_env.DATASET.CONTENT_SCENES = scenes[

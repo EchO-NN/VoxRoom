@@ -13,6 +13,12 @@ WINDOW_TITLE="Active Room Segmentation [$RUN_ID]"
 TASK_CONFIG="${TASK_CONFIG:-tasks/pointnav_habitat_test.yaml}"
 SPLIT="${SPLIT:-train}"
 REQUIRE_TOPOLOGY_TRANSITION="${REQUIRE_TOPOLOGY_TRANSITION:-0}"
+PAD_EPISODE_TO_MAX_STEPS="${PAD_EPISODE_TO_MAX_STEPS:-1}"
+ALLOW_EARLY_COMPLETION="${ALLOW_EARLY_COMPLETION:-0}"
+RUN_CONTEXT_REQUIRED="${RUN_CONTEXT_REQUIRED:-0}"
+RUN_CONTEXT_MANIFEST="${RUN_CONTEXT_MANIFEST:-}"
+RUN_CONTEXT_DATASET="${RUN_CONTEXT_DATASET:-}"
+WINDOW_CHECKPOINT_EVERY_STEPS="${WINDOW_CHECKPOINT_EVERY_STEPS:-100}"
 VISUALIZATION_FRAME_EVERY_STEPS="${VISUALIZATION_FRAME_EVERY_STEPS:-5}"
 VISUALIZATION_REFRESH_SECONDS="${VISUALIZATION_REFRESH_SECONDS:-0.01}"
 STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-900}"
@@ -36,20 +42,80 @@ if [[ "$REQUIRE_TOPOLOGY_TRANSITION" != "0" \
     echo "REQUIRE_TOPOLOGY_TRANSITION must be 0 or 1" >&2
     exit 1
 fi
+if [[ "$PAD_EPISODE_TO_MAX_STEPS" != "0" \
+    && "$PAD_EPISODE_TO_MAX_STEPS" != "1" ]]; then
+    echo "PAD_EPISODE_TO_MAX_STEPS must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$ALLOW_EARLY_COMPLETION" != "0" \
+    && "$ALLOW_EARLY_COMPLETION" != "1" ]]; then
+    echo "ALLOW_EARLY_COMPLETION must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$RUN_CONTEXT_REQUIRED" != "0" \
+    && "$RUN_CONTEXT_REQUIRED" != "1" ]]; then
+    echo "RUN_CONTEXT_REQUIRED must be 0 or 1" >&2
+    exit 1
+fi
+if [[ ! "$WINDOW_CHECKPOINT_EVERY_STEPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "WINDOW_CHECKPOINT_EVERY_STEPS must be a positive integer" >&2
+    exit 1
+fi
+if [[ "$PAD_EPISODE_TO_MAX_STEPS" == "$ALLOW_EARLY_COMPLETION" ]]; then
+    echo "Padding and early-completion modes are inconsistent" >&2
+    exit 1
+fi
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" \
+    && ("$TASK_CONFIG" != "tasks/pointnav_gibson_visual.yaml" \
+        || "$SPLIT" != "val" \
+        || "$REQUIRE_TOPOLOGY_TRANSITION" != "1" \
+        || "$PAD_EPISODE_TO_MAX_STEPS" != "0" \
+        || "$ALLOW_EARLY_COMPLETION" != "1" \
+        || "$VISUALIZATION_FRAME_EVERY_STEPS" != "5" \
+        || "$WINDOW_CHECKPOINT_EVERY_STEPS" != "100") ]]; then
+    echo "Run context requires the fixed strict Gibson contract" >&2
+    exit 1
+fi
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" \
+    && (! -f "$RUN_CONTEXT_MANIFEST" || ! -f "$RUN_CONTEXT_DATASET") ]]; then
+    echo "Required run context files are missing" >&2
+    exit 1
+fi
 
 uid="$(id -u)"
+session_listing="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+        loginctl list-sessions --no-legend
+)"
 mapfile -t physical_sessions < <(
-    loginctl list-sessions --no-legend |
-        awk -v uid="$uid" '$2 == uid && $4 == "seat0" {print $1}'
+    awk -v uid="$uid" '$2 == uid && $4 == "seat0" {print $1}' \
+        <<<"$session_listing"
 )
 if [[ "${#physical_sessions[@]}" -ne 1 ]]; then
     echo "Expected one physical seat0 session, found ${#physical_sessions[@]}" >&2
     exit 1
 fi
 session_id="${physical_sessions[0]}"
-if [[ "$(loginctl show-session "$session_id" -p Remote --value)" != "no" ]] \
-    || [[ "$(loginctl show-session "$session_id" -p Active --value)" != "yes" ]] \
-    || [[ "$(loginctl show-session "$session_id" -p Type --value)" != "x11" ]]; then
+session_remote="$(
+    timeout 10s loginctl show-session "$session_id" -p Remote --value
+)"
+session_active="$(
+    timeout 10s loginctl show-session "$session_id" -p Active --value
+)"
+session_type="$(
+    timeout 10s loginctl show-session "$session_id" -p Type --value
+)"
+session_seat="$(
+    timeout 10s loginctl show-session "$session_id" -p Seat --value
+)"
+session_vtnr="$(
+    timeout 10s loginctl show-session "$session_id" -p VTNr --value
+)"
+if [[ "$session_remote" != "no" \
+    || "$session_active" != "yes" \
+    || "$session_type" != "x11" \
+    || "$session_seat" != "seat0" \
+    || ! "$session_vtnr" =~ ^[1-9][0-9]*$ ]]; then
     echo "The seat0 session is not an active local X11 session" >&2
     exit 1
 fi
@@ -57,7 +123,7 @@ fi
 export XDG_RUNTIME_DIR="/run/user/$uid"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 desktop_environment="$(
-    DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+    timeout --signal=TERM --kill-after=5s 10s \
         systemctl --user show-environment
 )"
 export DISPLAY="$(
@@ -68,8 +134,48 @@ export XAUTHORITY="$(
     awk -F= '$1 == "XAUTHORITY" {sub(/^[^=]*=/, ""); print; exit}' \
         <<<"$desktop_environment"
 )"
-if [[ -z "$DISPLAY" || -z "$XAUTHORITY" || ! -S "/tmp/.X11-unix/X${DISPLAY#:}" ]]; then
+if [[ ! "$DISPLAY" =~ ^:[0-9]+$ || -z "$XAUTHORITY" ]]; then
     echo "The physical X11 display environment is incomplete" >&2
+    exit 1
+fi
+x11_socket="/tmp/.X11-unix/X${DISPLAY#:}"
+if [[ ! -S "$x11_socket" || ! -r "$XAUTHORITY" ]]; then
+    echo "The physical X11 socket or authority file is unavailable" >&2
+    exit 1
+fi
+xserver_pid="$(
+    timeout --signal=TERM --kill-after=5s 10s \
+        fuser "$x11_socket" 2>/dev/null |
+        xargs
+)"
+if [[ ! "$xserver_pid" =~ ^[1-9][0-9]*$ \
+    || "$(<"/proc/$xserver_pid/comm")" != "Xorg" ]]; then
+    echo "The display socket is not owned by one Xorg process" >&2
+    exit 1
+fi
+session_control_group="$(
+    timeout 10s systemctl show "session-$session_id.scope" \
+        -p ControlGroup --value
+)"
+session_processes="/sys/fs/cgroup${session_control_group}/cgroup.procs"
+if [[ ! -r "$session_processes" ]] \
+    || ! grep -Fxq "$xserver_pid" "$session_processes"; then
+    echo "The Xorg process is outside the selected seat0 session" >&2
+    exit 1
+fi
+mapfile -d '' -t xserver_args <"/proc/$xserver_pid/cmdline"
+xserver_auth=""
+xserver_vt_confirmed=0
+for ((argument_index = 0; argument_index < ${#xserver_args[@]}; argument_index++)); do
+    if [[ "${xserver_args[$argument_index]}" == "-auth" ]]; then
+        xserver_auth="${xserver_args[$((argument_index + 1))]:-}"
+    fi
+    if [[ "${xserver_args[$argument_index]}" == "vt$session_vtnr" ]]; then
+        xserver_vt_confirmed=1
+    fi
+done
+if [[ "$xserver_auth" != "$XAUTHORITY" || "$xserver_vt_confirmed" != "1" ]]; then
+    echo "The X11 environment does not belong to the selected physical VT" >&2
     exit 1
 fi
 
@@ -78,11 +184,25 @@ export ACTIVE_ROOM_DETR_DIR="$DETR_DIR"
 export ACTIVE_ROOM_DETECTOR_DEVICE="cuda"
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
-DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" xwininfo -root >/dev/null
-"$PYTHON" -c \
+DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+    timeout --signal=TERM --kill-after=5s 10s xwininfo -root >/dev/null
+timeout --signal=TERM --kill-after=10s 60s "$PYTHON" -c \
     "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0)); torch.zeros(1, device='cuda')"
+timeout --signal=TERM --kill-after=10s 180s \
+    "$PYTHON" "$ROOT_DIR/scripts/validate_install.py" >/dev/null
 
 mkdir -p "$RUN_DIR"
+install -m 0444 "$ROOT_DIR/reproduction_install.json" \
+    "$RUN_DIR/runtime_install.json"
+run_context_args=()
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
+    install -m 0444 "$RUN_CONTEXT_MANIFEST" "$RUN_DIR/input_manifest.json"
+    install -m 0444 "$RUN_CONTEXT_DATASET" "$RUN_DIR/input_dataset.json.gz"
+    run_context_args=(
+        --run_context_manifest "$RUN_DIR/input_manifest.json"
+        --run_context_dataset "$RUN_DIR/input_dataset.json.gz"
+    )
+fi
 command=(
     "$PYTHON" -u "$ROOT_DIR/explorable_with_door_detection.py"
     --task_config "$TASK_CONFIG"
@@ -101,7 +221,9 @@ command=(
     --print_images 0
     --visualization_frame_every_steps "$VISUALIZATION_FRAME_EVERY_STEPS"
     --visualization_refresh_seconds "$VISUALIZATION_REFRESH_SECONDS"
+    --window_checkpoint_every_steps "$WINDOW_CHECKPOINT_EVERY_STEPS"
     --require_topology_transition "$REQUIRE_TOPOLOGY_TRANSITION"
+    --pad_episode_to_max_steps "$PAD_EPISODE_TO_MAX_STEPS"
     --detector_device cuda
     --detr_source_dir "$DETR_DIR"
     --run_id "$RUN_ID"
@@ -109,12 +231,13 @@ command=(
     --run_dir "$RUN_DIR"
     --dump_location "$RUN_DIR"
     --exp_name native
+    "${run_context_args[@]}"
 )
 printf '%q ' "${command[@]}" >"$RUN_DIR/command.txt"
 printf '\n' >>"$RUN_DIR/command.txt"
 
 cleanup() {
-    if [[ -n "${run_pid:-}" ]] && kill -0 "$run_pid" 2>/dev/null; then
+    if [[ -n "${run_pid:-}" ]] && kill -0 -- "-$run_pid" 2>/dev/null; then
         kill -TERM -- "-$run_pid" 2>/dev/null || true
         sleep 2
         kill -KILL -- "-$run_pid" 2>/dev/null || true
@@ -128,31 +251,131 @@ setsid bash -c 'cd "$1"; shift; exec "$@"' \
 run_pid=$!
 printf '%s\n' "$run_pid" >"$RUN_DIR/process_id.txt"
 
+verify_physical_session() {
+    local current_socket_pid
+    [[ "$(
+        timeout 10s loginctl show-session "$session_id" -p Active --value
+    )" == "yes" ]] || return 1
+    [[ "$(
+        timeout 10s loginctl show-session "$session_id" -p Remote --value
+    )" == "no" ]] || return 1
+    [[ "$(
+        timeout 10s loginctl show-session "$session_id" -p Type --value
+    )" == "x11" ]] || return 1
+    [[ "$(
+        timeout 10s loginctl show-session "$session_id" -p Seat --value
+    )" == "seat0" ]] || return 1
+    current_socket_pid="$(
+        timeout --signal=TERM --kill-after=5s 10s \
+            fuser "$x11_socket" 2>/dev/null |
+            xargs
+    )"
+    [[ "$current_socket_pid" == "$xserver_pid" ]] || return 1
+    grep -Fxq "$xserver_pid" "$session_processes" || return 1
+    physical_session_checks=$((physical_session_checks + 1))
+    last_physical_session_check_unix="$(date +%s.%N)"
+}
+
+verify_live_window() {
+    local candidate_id="$1"
+    local candidate_pid
+    verify_physical_session || return 1
+    candidate_pid="$(
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+            timeout --signal=TERM --kill-after=2s 5s \
+            xprop -id "$candidate_id" _NET_WM_PID 2>/dev/null |
+            awk -F' = ' 'NF == 2 {print $2}'
+    )"
+    [[ "$candidate_pid" == "$run_pid" ]] || return 1
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=2s 5s \
+        xprop -id "$candidate_id" WM_NAME 2>/dev/null |
+        grep -Fq "\"$WINDOW_TITLE\"" || return 1
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=2s 5s \
+        xwininfo -id "$candidate_id" 2>/dev/null |
+        grep -Fq "Map State: IsViewable"
+}
+
 window_id=""
+physical_session_checks=0
+last_physical_session_check_unix=0
+checkpoint_steps=""
+checkpoint_count=0
+next_checkpoint="$WINDOW_CHECKPOINT_EVERY_STEPS"
+
+capture_ready_checkpoint() {
+    local checkpoint_label
+    local checkpoint_ready
+    local current_progress
+    local ready_run_id
+    local ready_process_id
+    local ready_window_id
+    local ready_step
+    [[ -s "$RUN_DIR/progress.jsonl" ]] || return 0
+    checkpoint_label="$(printf '%06d' "$next_checkpoint")"
+    checkpoint_ready="$RUN_DIR/window_checkpoints/ready_$checkpoint_label.json"
+    [[ -s "$checkpoint_ready" ]] || return 0
+    current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
+    read -r ready_run_id ready_process_id ready_window_id ready_step < <(
+        timeout --signal=TERM --kill-after=2s 10s \
+            "$PYTHON" -c \
+            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"])' \
+            "$checkpoint_ready"
+    )
+    if [[ "$ready_run_id" != "$RUN_ID" \
+        || "$ready_process_id" != "$run_pid" \
+        || "$ready_window_id" != "$window_id" \
+        || "$ready_step" != "$next_checkpoint" \
+        || "$current_progress" != "$next_checkpoint" ]]; then
+        echo "Periodic capture handshake identity mismatch" >&2
+        return 1
+    fi
+    verify_live_window "$window_id"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=5s 30s \
+        "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+        --window-id "$window_id" \
+        --window-output \
+        "$RUN_DIR/window_checkpoints/step_$checkpoint_label.png"
+    printf '%s\n' "$RUN_ID" \
+        >"$RUN_DIR/window_checkpoints/.ack_$checkpoint_label.tmp"
+    mv "$RUN_DIR/window_checkpoints/.ack_$checkpoint_label.tmp" \
+        "$RUN_DIR/window_checkpoints/ack_$checkpoint_label.txt"
+    if [[ -n "$checkpoint_steps" ]]; then
+        checkpoint_steps+=","
+    fi
+    checkpoint_steps+="$next_checkpoint"
+    checkpoint_count=$((checkpoint_count + 1))
+    next_checkpoint=$((next_checkpoint + WINDOW_CHECKPOINT_EVERY_STEPS))
+}
+
 startup_deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
 while ((SECONDS < startup_deadline)); do
     if ! kill -0 "$run_pid" 2>/dev/null; then
         break
     fi
-    if [[ -s "$RUN_DIR/progress.jsonl" ]]; then
-        while read -r candidate_id; do
-            if DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-                xwininfo -id "$candidate_id" 2>/dev/null |
-                    grep -Fq "Map State: IsViewable"; then
-                window_id="$candidate_id"
-                break
-            fi
-        done < <(
-            DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-                xwininfo -root -tree 2>/dev/null |
-                awk -v title="\"$WINDOW_TITLE\"" 'index($0, title) {print $1}'
-        )
+    if [[ -z "$window_id" && -s "$RUN_DIR/run_metadata.json" ]]; then
+        window_id="$(
+            timeout --signal=TERM --kill-after=2s 10s \
+                "$PYTHON" -c \
+                'import json,sys; print(json.load(open(sys.argv[1]))["x11_client_window_id"])' \
+                "$RUN_DIR/run_metadata.json"
+        )"
     fi
-    [[ -n "$window_id" ]] && break
+    if [[ -n "$window_id" ]] \
+        && verify_live_window "$window_id" \
+        && [[ -s "$RUN_DIR/progress.jsonl" ]]; then
+        break
+    fi
     sleep 1
 done
-if [[ -z "$window_id" ]]; then
-    echo "A viewable live window carrying run ID $RUN_ID was not observed" >&2
+if [[ -z "$window_id" ]] || ! verify_live_window "$window_id"; then
+    echo "The process-owned live X11 client window was not observed" >&2
+    exit 1
+fi
+if [[ ! -s "$RUN_DIR/progress.jsonl" ]]; then
+    echo "The live dashboard did not reach its first control step" >&2
     exit 1
 fi
 
@@ -162,6 +385,7 @@ while ((SECONDS < first_refresh_deadline)); do
     if ! kill -0 "$run_pid" 2>/dev/null; then
         break
     fi
+    capture_ready_checkpoint
     first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
     ((first_step >= first_refresh_target)) && break
     sleep 1
@@ -173,6 +397,7 @@ if ((first_step < first_refresh_target)); then
 fi
 
 DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+    timeout --signal=TERM --kill-after=5s 30s \
     "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
     --window-id "$window_id" \
     --window-output "$RUN_DIR/window_first.png" \
@@ -184,6 +409,7 @@ while ((SECONDS < later_deadline)); do
     if ! kill -0 "$run_pid" 2>/dev/null; then
         break
     fi
+    capture_ready_checkpoint
     current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
     ((current_step >= later_target)) && break
     sleep 1
@@ -195,22 +421,81 @@ if ((current_step < later_target)); then
 fi
 
 DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+    timeout --signal=TERM --kill-after=5s 30s \
     "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
     --window-id "$window_id" \
     --window-output "$RUN_DIR/window_later.png"
 printf 'run_id=%s\nprocess_id=%s\ndisplay=%s\nsession_id=%s\nwindow_id=%s\nwindow_title=%s\nfirst_step=%s\nlater_step=%s\nconfirmed=1\n' \
     "$RUN_ID" "$run_pid" "$DISPLAY" "$session_id" "$window_id" "$WINDOW_TITLE" \
     "$first_step" "$current_step" >"$RUN_DIR/live_visualization.txt"
+printf 'session_vtnr=%s\nxserver_pid=%s\nxauthority=%s\nx11_socket=%s\nphysical_session_confirmed=1\n' \
+    "$session_vtnr" "$xserver_pid" "$XAUTHORITY" "$x11_socket" \
+    >>"$RUN_DIR/live_visualization.txt"
 
 last_progress="$current_step"
 last_progress_at="$SECONDS"
+mid_target=$((current_step + 20))
+mid_step=0
+terminal_captured=0
+terminal_step=0
+window_viewable_checks=2
+last_window_viewable_unix="$(date +%s.%N)"
 run_deadline=$((SECONDS + RUN_TIMEOUT_SECONDS))
 while kill -0 "$run_pid" 2>/dev/null; do
     sleep 2
+    if ! kill -0 "$run_pid" 2>/dev/null; then
+        break
+    fi
+    if ! verify_live_window "$window_id"; then
+        if ! kill -0 "$run_pid" 2>/dev/null; then
+            break
+        fi
+        echo "The process-owned live visualization window became unavailable" >&2
+        exit 1
+    fi
+    window_viewable_checks=$((window_viewable_checks + 1))
+    last_window_viewable_unix="$(date +%s.%N)"
+    capture_ready_checkpoint
     current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
     if ((current_progress > last_progress)); then
         last_progress="$current_progress"
         last_progress_at="$SECONDS"
+    fi
+    if ((mid_step == 0 && current_progress >= mid_target)); then
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+            timeout --signal=TERM --kill-after=5s 30s \
+            "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+            --window-id "$window_id" \
+            --window-output "$RUN_DIR/window_mid.png"
+        mid_step="$current_progress"
+    fi
+    if [[ "$terminal_captured" == "0" \
+        && -s "$RUN_DIR/terminal_capture_ready.json" ]]; then
+        read -r ready_run_id ready_process_id ready_window_id ready_step < <(
+            timeout --signal=TERM --kill-after=2s 10s \
+                "$PYTHON" -c \
+                'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"])' \
+                "$RUN_DIR/terminal_capture_ready.json"
+        )
+        if [[ "$ready_run_id" != "$RUN_ID" \
+            || "$ready_process_id" != "$run_pid" \
+            || "$ready_window_id" != "$window_id" \
+            || "$ready_step" != "$current_progress" ]]; then
+            echo "Terminal capture handshake identity mismatch" >&2
+            exit 1
+        fi
+        verify_live_window "$window_id"
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+            timeout --signal=TERM --kill-after=5s 30s \
+            "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+            --window-id "$window_id" \
+            --window-output "$RUN_DIR/window_terminal.png" \
+            --desktop-output "$RUN_DIR/live_desktop_terminal.png"
+        printf '%s\n' "$RUN_ID" >"$RUN_DIR/.terminal_capture_ack.tmp"
+        mv "$RUN_DIR/.terminal_capture_ack.tmp" \
+            "$RUN_DIR/terminal_capture_ack.txt"
+        terminal_step="$current_progress"
+        terminal_captured=1
     fi
     if ((SECONDS - last_progress_at > STALL_TIMEOUT_SECONDS)); then
         echo "Control progress stalled at step $last_progress" >&2
@@ -221,18 +506,37 @@ while kill -0 "$run_pid" 2>/dev/null; do
         exit 1
     fi
 done
+printf 'mid_step=%s\nwindow_viewable_checks=%s\nlast_window_viewable_unix=%s\n' \
+    "$mid_step" "$window_viewable_checks" "$last_window_viewable_unix" \
+    >>"$RUN_DIR/live_visualization.txt"
+printf 'physical_session_checks=%s\nlast_physical_session_check_unix=%s\n' \
+    "$physical_session_checks" "$last_physical_session_check_unix" \
+    >>"$RUN_DIR/live_visualization.txt"
+printf 'checkpoint_every_steps=%s\ncheckpoint_count=%s\ncheckpoint_steps=%s\nterminal_captured=%s\nterminal_step=%s\n' \
+    "$WINDOW_CHECKPOINT_EVERY_STEPS" "$checkpoint_count" "$checkpoint_steps" \
+    "$terminal_captured" "$terminal_step" >>"$RUN_DIR/live_visualization.txt"
 
 set +e
 wait "$run_pid"
 run_status=$?
 set -e
+process_group_exit_deadline=$((SECONDS + 10))
+while kill -0 -- "-$run_pid" 2>/dev/null \
+    && ((SECONDS < process_group_exit_deadline)); do
+    sleep 1
+done
+if kill -0 -- "-$run_pid" 2>/dev/null; then
+    echo "The runtime process group retained descendant processes" >&2
+    exit 1
+fi
 run_pid=""
 if [[ "$run_status" -ne 0 ]]; then
     echo "Active Room Segmentation exited with status $run_status" >&2
     exit "$run_status"
 fi
 
-"$PYTHON" "$ROOT_DIR/scripts/render_replay.py" \
+timeout --signal=TERM --kill-after=10s 300s \
+    "$PYTHON" "$ROOT_DIR/scripts/render_replay.py" \
     --run-dir "$RUN_DIR"
 
 validation_args=(
@@ -244,7 +548,13 @@ validation_args=(
 if [[ "$REQUIRE_TOPOLOGY_TRANSITION" == "1" ]]; then
     validation_args+=(--require-topology-transition)
 fi
-"${validation_args[@]}"
+if [[ "$ALLOW_EARLY_COMPLETION" == "1" ]]; then
+    validation_args+=(--allow-early-completion)
+fi
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
+    validation_args+=(--require-run-context)
+fi
+timeout --signal=TERM --kill-after=10s 300s "${validation_args[@]}"
 
 trap - EXIT
 echo "$RUN_DIR"

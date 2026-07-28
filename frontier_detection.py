@@ -119,11 +119,10 @@ class Frontier_detection():
         bot_local_map = self.map[current_pose[0]-1:current_pose[0]+2, current_pose[1]-1:current_pose[1]+2]
         if bot_local_map.shape[0] == 3 and bot_local_map.shape[1] == 3:
             if self.map[current_pose[0], current_pose[1]] != 0:
-                try:
-                    new_start_offset = np.argwhere(bot_local_map == 0)[0]-np.array([1,1])
+                free_offsets = np.argwhere(bot_local_map == 0)
+                if len(free_offsets) > 0:
+                    new_start_offset = free_offsets[0]-np.array([1,1])
                     current_pose += new_start_offset
-                except:
-                    pass
         current_pose = current_pose.tolist()
         if current_pose[0] <0:
             current_pose[0] = 0

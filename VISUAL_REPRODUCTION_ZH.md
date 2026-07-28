@@ -56,14 +56,20 @@ SCENE_ID=Swormville MAX_EPISODE_STEPS=2500 \
   scripts/run_gibson_visual.sh
 ```
 
-入口会先核对官方 PointNav 的 72 个训练场景文件、994 个验证 episode、
-30 个迷你验证 episode，以及全部 86 个被引用场景的 GLB/navmesh。随后验证
-所选官方 episode 的起终点可导航、路径连通且测得距离与数据集记录一致，
-再启动严格实时四视图。默认 `Swormville` 与上游仓库演示场景一致；脚本不会
-下载、替换或重建 Gibson 资产，也不会在资产缺失时切换到其他数据集。
+入口会先核对已授权下载的 10.83 GB 压缩包 SHA256、492 对 GLB/navmesh、
+403 MB PointNav 数据树 SHA256、72 个训练场景文件、994 个验证 episode、
+30 个迷你验证 episode，以及全部 86 个被引用场景。所选 GLB/navmesh 还必须
+逐字节匹配压缩包条目；随后验证官方 episode 的起终点可导航、路径连通且
+测得距离与数据集记录一致，再启动严格实时四视图。
+预处理结果写入以 run ID 命名且不可覆盖的独立目录；启动时复制到输出目录，
+Habitat 直接读取这份运行内的单 episode 数据，不读取共享的可变中间文件。
+加载后还会对实际 episode 的起点、旋转、目标、距离信息和路径字段重新计算摘要，
+防止“文件校验正确但仿真载入了另一条 episode”。
 
-默认上限为 2000 步，严格模式默认开启。只有同时观察到门穿越和房间切换
-确认事件，验证才通过。
+默认 `Swormville` 与上游仓库演示场景一致。`MAX_EPISODE_STEPS=2500` 是
+硬上限，拓扑探索完成后立即结束，不再用原地转向补足步数。Gibson 入口不允许
+关闭严格门穿越验证，也不会下载、替换、重建资产或切换到其他数据集。只有同时
+观察到门穿越和房间切换确认事件，验证才通过。
 
 门穿越采用单一的轨迹几何判据，不使用单帧重检兜底：
 
@@ -73,6 +79,8 @@ SCENE_ID=Swormville MAX_EPISODE_STEPS=2500 \
 4. 轨迹终点到目标侧航点必须不超过 6 个地图网格。
 
 任一条件不满足都会记录拒绝事件，并把当前拓扑节点恢复到源房间。
+严格成功还要求至少一组已确认穿越对应的节点、方向、边 ID 和目标航点仍存在于
+最终拓扑中；若后续节点合并使历史边失效，不能继续沿用旧事件宣称成功。
 若只是检查安装和单房间运行，可明确关闭：
 
 ```bash
@@ -89,14 +97,19 @@ REQUIRE_TOPOLOGY_TRANSITION=0 MAX_EPISODE_STEPS=120 \
 - 左下：房间拓扑有向图，区分 exploring、explored 和 unexplored。
 - 右下：探索比例、运行阶段、动作以及最近拓扑事件。
 
-窗口标题包含唯一 run ID。启动脚本会在物理 `seat0` 桌面确认该窗口可见，
-并在相隔多个控制步后分别截图，保证不是空白或静态窗口。
+窗口标题包含唯一 run ID。启动脚本会把 X11 client PID 与算法进程绑定，
+记录确切 client window ID，在物理 `seat0` 桌面取得启动、稍后和中途三张
+窗口截图；长回合每 100 控制步继续保存一次物理窗口像素。算法完成后保持窗口，
+等待启动器完成终态窗口与桌面截图并回传确认，再允许进程退出。验证器还会分别
+检查 RGB、地图、拓扑和状态四个面板非空且从首帧到终帧发生变化。
 
 ## 每次运行的证据
 
 结果位于 `outputs/habitat_test_<run-tag>/`：
 
 - `result.json`：闭环结果、探索量、拓扑状态和 tail 步数。
+- `input_manifest.json`：本次场景、episode、压缩包和资产摘要。
+- `input_dataset.json.gz`：本次实际使用的单 episode PointNav 数据。
 - `progress.jsonl`：严格连续的每步控制、仿真、阶段和拓扑计数。
 - `topology_events.jsonl`：门、节点、边、出口选择和换房事件。
 - `topology_final.json`：最终可序列化拓扑图和严格模式结论。
@@ -104,6 +117,16 @@ REQUIRE_TOPOLOGY_TRANSITION=0 MAX_EPISODE_STEPS=120 \
 - `visualization_final.png`：最终仪表盘。
 - `topology_replay.mp4`：由实际运行帧生成的回放。
 - `validation.json`：运行源码、验证器提交、窗口、图片、事件、耗时和闭环验证。
+- `runtime_install.json`：主仓库、DETR、Habitat/SG-Nav、CUDA 和门模型权重指纹。
+
+验证器要求可视化帧严格按配置步频连续，运行上下文在 metadata/result 中一致，
+活跃拓扑路径不存在裸异常捕获，并且 Gibson 运行的 `tail` 步数必须为 0。
+一旦输出目录出现 Gibson 输入清单和数据，验证器会自动启用严格模式，要求运行
+与验证使用同一提交，并且完整、唯一、有序地出现“拓扑完成、控制完成、运行完成”
+三类事件；中止事件或缺失完成原因都会直接失败。
+最终仪表盘必须在实际最后控制步再渲染一次，步频恰好对齐时的末帧也不能省略。
+运行前后会重复验证外部 DETR 提交、权重 SHA256、Habitat/SG-Nav 提交和环境版本，
+两次依赖闭包不一致时结果无效。
 
 `topology_status` 的含义：
 
@@ -117,9 +140,11 @@ REQUIRE_TOPOLOGY_TRANSITION=0 MAX_EPISODE_STEPS=120 \
 python scripts/render_replay.py --run-dir outputs/<run>
 python scripts/validate_run.py \
   --run-dir outputs/<run> \
-  --expected-steps 2000 \
+  --expected-steps 2500 \
   --run-id <run-id> \
-  --require-topology-transition
+  --require-topology-transition \
+  --allow-early-completion \
+  --require-run-context
 ```
 
 ## 已验证回合
