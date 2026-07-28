@@ -2041,7 +2041,6 @@ def main():
             "run_context": run_context,
             "x11_client_window_id": x11_client_window_id,
         }
-        write_json_atomic(run_dir / "result.json", summary)
         if run_context is not None:
             if live_figure is None or x11_client_window_id is None:
                 raise RuntimeError("Strict run has no terminal dashboard to capture")
@@ -2080,6 +2079,7 @@ def main():
                 plt.pause(0.05)
             if terminal_ack_path.read_text(encoding="utf-8").strip() != args.run_id:
                 raise RuntimeError("Terminal dashboard capture acknowledgement mismatch")
+        write_json_atomic(run_dir / "result.json", summary)
         envs.close()
         plt.close("all")
 

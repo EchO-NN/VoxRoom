@@ -153,18 +153,17 @@ class RuntimeDashboard:
             hspace=0.2,
         )
         self.rgb_axis = self.figure.add_subplot(grid[0, 0])
-        map_grid = grid[0, 1].subgridspec(1, 2, wspace=0.06)
-        self.map_axis = self.figure.add_subplot(map_grid[0, 0])
-        self.voxroom_axis = self.figure.add_subplot(map_grid[0, 1])
-        self.topology_axis = self.figure.add_subplot(grid[1, 0])
+        self.map_axis = self.figure.add_subplot(grid[0, 1])
+        self.voxroom_axis = self.figure.add_subplot(grid[1, 0])
         status_grid = grid[1, 1].subgridspec(
-            2,
+            3,
             1,
-            height_ratios=[1.0, 1.4],
-            hspace=0.32,
+            height_ratios=[1.1, 0.8, 1.2],
+            hspace=0.38,
         )
-        self.metrics_axis = self.figure.add_subplot(status_grid[0, 0])
-        self.events_axis = self.figure.add_subplot(status_grid[1, 0])
+        self.topology_axis = self.figure.add_subplot(status_grid[0, 0])
+        self.metrics_axis = self.figure.add_subplot(status_grid[1, 0])
+        self.events_axis = self.figure.add_subplot(status_grid[2, 0])
 
     def _draw_capture_marker(self, step):
         for artist in self.capture_marker_artists:
