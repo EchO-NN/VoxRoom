@@ -45,6 +45,23 @@ scripts/run_mp3d_visual.sh
 SCENE_ID=Z6MFQCViBuw MAX_EPISODE_STEPS=2000 scripts/run_mp3d_visual.sh
 ```
 
+## Gibson 官方场景运行
+
+在已获授权并将官方 Habitat 版 Gibson 解压到
+`data/scene_datasets/gibson/` 后，运行：
+
+```bash
+cd ~/Active_room_segmentation
+SCENE_ID=Swormville MAX_EPISODE_STEPS=2500 \
+  scripts/run_gibson_visual.sh
+```
+
+入口会先核对官方 PointNav 的 72 个训练场景文件、994 个验证 episode、
+30 个迷你验证 episode，以及全部 86 个被引用场景的 GLB/navmesh。随后验证
+所选官方 episode 的起终点可导航、路径连通且测得距离与数据集记录一致，
+再启动严格实时四视图。默认 `Swormville` 与上游仓库演示场景一致；脚本不会
+下载、替换或重建 Gibson 资产，也不会在资产缺失时切换到其他数据集。
+
 默认上限为 2000 步，严格模式默认开启。只有同时观察到门穿越和房间切换
 确认事件，验证才通过。
 

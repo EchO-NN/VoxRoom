@@ -50,3 +50,18 @@ their dataset terms and must be supplied by an authorized user; the bootstrap
 does not download, redistribute, or replace them. Once both are present, the
 original `tasks/pointnav_gibson.yaml` configuration remains the benchmark entry
 point.
+
+For an authorized local Gibson installation, run the deterministic visual
+entry point:
+
+```bash
+cd ~/Active_room_segmentation
+SCENE_ID=Swormville MAX_EPISODE_STEPS=2500 \
+  scripts/run_gibson_visual.sh
+```
+
+Before launching, it verifies the official PointNav inventory, every referenced
+GLB/navmesh pair, the selected episode's navigability and recorded geodesic
+distance. It then writes a one-episode dataset derived from the official
+validation split and runs the same strict live visualization and artifact
+validator. It never downloads, substitutes, or regenerates Gibson assets.
