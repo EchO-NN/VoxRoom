@@ -267,10 +267,13 @@ class RuntimeDashboard:
         if labeled_count == 0:
             return
         occupied_overlap = int(np.count_nonzero(labeled & occupied))
-        if occupied_overlap:
+        occupied_overlap_ratio = occupied_overlap / labeled_count
+        if occupied_overlap_ratio > 0.02:
             raise RuntimeError(
-                "Room labels overlap {} occupied map cells".format(
-                    occupied_overlap
+                "Room labels overlap too many occupied map cells: "
+                "{} ({:.3f})".format(
+                    occupied_overlap,
+                    occupied_overlap_ratio,
                 )
             )
         explored_overlap = int(np.count_nonzero(labeled & explored))

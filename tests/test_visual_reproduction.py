@@ -328,6 +328,26 @@ class VisualReproductionTests(unittest.TestCase):
                 room_labels,
             )
 
+    def test_live_alignment_allows_small_transient_occupancy_overlap(self):
+        occupied = np.zeros((20, 20), dtype=np.float32)
+        explored = np.ones((20, 20), dtype=np.float32)
+        room_labels = np.ones((20, 20), dtype=np.uint16)
+        occupied[0, :5] = 1
+
+        RuntimeDashboard._validate_room_alignment(
+            occupied,
+            explored,
+            room_labels,
+        )
+
+        occupied[0:2, :] = 1
+        with self.assertRaisesRegex(RuntimeError, "too many occupied"):
+            RuntimeDashboard._validate_room_alignment(
+                occupied,
+                explored,
+                room_labels,
+            )
+
     def test_fixed_render_is_independent_of_live_figure_reflow(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
