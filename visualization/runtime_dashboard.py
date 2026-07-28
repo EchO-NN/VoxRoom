@@ -150,20 +150,11 @@ class RuntimeDashboard:
             bottom=0.055,
             top=0.94,
             wspace=0.12,
-            hspace=0.2,
+            hspace=0.16,
         )
         self.rgb_axis = self.figure.add_subplot(grid[0, 0])
         self.map_axis = self.figure.add_subplot(grid[0, 1])
-        self.voxroom_axis = self.figure.add_subplot(grid[1, 0])
-        status_grid = grid[1, 1].subgridspec(
-            3,
-            1,
-            height_ratios=[1.1, 0.8, 1.2],
-            hspace=0.38,
-        )
-        self.topology_axis = self.figure.add_subplot(status_grid[0, 0])
-        self.metrics_axis = self.figure.add_subplot(status_grid[1, 0])
-        self.events_axis = self.figure.add_subplot(status_grid[2, 0])
+        self.voxroom_axis = self.figure.add_subplot(grid[1, :])
 
     def _draw_capture_marker(self, step):
         for artist in self.capture_marker_artists:
@@ -656,16 +647,8 @@ class RuntimeDashboard:
             trajectory_xy,
         )
         self._draw_voxroom(self.last_voxroom_image)
-        self._draw_topology(topology_snapshot)
-        self._draw_metrics(
-            coverage_history,
-            step,
-            explored_ratio,
-            explored_area,
-        )
-        self._draw_events(status, events)
         self.figure.suptitle(
-            "Active Room Segmentation | step {:04d} | {}".format(
+            "Room Segmentation Accuracy View | step {:04d} | {}".format(
                 int(step),
                 status.get("phase", "unknown"),
             ),

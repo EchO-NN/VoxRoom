@@ -330,7 +330,7 @@ class GibsonVisualPreparationTests(unittest.TestCase):
 
             ImageOps.invert(first).resize((1200, 900)).save(terminal_path)
             metrics = check_dashboard_panels(first_path, terminal_path)
-            self.assertEqual(set(metrics), {"rgb", "map", "topology", "status"})
+            self.assertEqual(set(metrics), {"rgb", "map", "voxroom"})
 
     def test_validator_uses_the_preparer_data_baseline(self):
         self.assertEqual(

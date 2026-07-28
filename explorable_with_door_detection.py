@@ -516,6 +516,16 @@ def main():
                 "voxroom_sidecar",
                 perf_counter() - voxroom_started_at,
             )
+            if info.get("navigation_map_source") != (
+                "voxroom_last_voxel_navigation_projection"
+            ):
+                raise RuntimeError(
+                    "Active Room exploration did not receive the VoxRoom navigation map"
+                )
+            if int(info.get("navigation_map_step", -1)) != int(step):
+                raise RuntimeError(
+                    "Active Room exploration received a stale VoxRoom navigation map"
+                )
         topology_snapshot = (
             topology_provider["snapshot"]()
             if topology_provider["snapshot"] is not None
@@ -552,6 +562,7 @@ def main():
                 if voxroom_response is None
                 else int(voxroom_response["room_count"])
             ),
+            "navigation_map_source": info.get("navigation_map_source"),
             "timestamp_unix": time(),
         }
         with progress_path.open("a", encoding="utf-8") as progress_file:
@@ -614,6 +625,12 @@ def main():
             int(infos[0]["time"]),
             infos[0],
         )
+        if infos[0].get("navigation_map_source") != (
+            "voxroom_last_voxel_navigation_projection"
+        ):
+            raise RuntimeError(
+                "Initial Active Room exploration map did not come from VoxRoom"
+            )
     actual_episode_id = str(infos[0].get("episode_id", ""))
     actual_episode_contract_sha256 = str(
         infos[0].get("episode_contract_sha256", "")
@@ -670,6 +687,11 @@ def main():
             "voxroom_sidecar": bool(voxroom_sidecar is not None),
             "voxroom_root": args.voxroom_root if args.voxroom_sidecar else None,
             "voxroom_config": args.voxroom_config if args.voxroom_sidecar else None,
+            "exploration_navigation_source": (
+                "voxroom_last_voxel_navigation_projection"
+                if args.voxroom_sidecar
+                else "active_room_internal_mapper"
+            ),
         }
     )
     write_json_atomic(run_dir / "run_metadata.json", run_metadata)
@@ -1048,6 +1070,12 @@ def main():
                 # gt_map = gt_map[:, ::-1]  # flip horizontally
                 gt_map_local_grid = np.rint(gt_map[gx1:gx2, gy1:gy2])
                 gt_exp_local_grid = np.rint(gt_exp[gx1:gx2, gy1:gy2])
+                gt_free_local_grid = None
+                if "voxroom_navigation_free" in infos[0]:
+                    gt_free_local_grid = np.asarray(
+                        infos[0]["voxroom_navigation_free"],
+                        dtype=bool,
+                    )[gx1:gx2, gy1:gy2]
                 gt_map = gt_map.transpose()
                 gt_exp = gt_exp.transpose()
                 # ---------------------------------------------
@@ -1057,6 +1085,8 @@ def main():
                     p_input['goal'] = goal
                     p_input['map_pred'] = gt_map_local_grid
                     p_input['exp_pred'] = gt_exp_local_grid
+                    if gt_free_local_grid is not None:
+                        p_input['navigation_free_pred'] = gt_free_local_grid
                     p_input['pose_pred'] = planner_pose_inputs[0]
                     p_input['mid_out'] = True
                 path_list = []
@@ -1102,6 +1132,8 @@ def main():
                     p_input['goal'] = goal
                     p_input['map_pred'] = gt_map_local_grid
                     p_input['exp_pred'] = gt_exp_local_grid
+                    if gt_free_local_grid is not None:
+                        p_input['navigation_free_pred'] = gt_free_local_grid
                     p_input['pose_pred'] = planner_pose_inputs[0]
                     p_input['mid_out'] = True
                 output = envs.get_short_term_goal(planner_inputs)
@@ -1228,6 +1260,12 @@ def main():
                 # gt_exp_local_grid = np.rint(gt_exp[gy1:gy2, gx1:gx2])
                 gt_map_local_grid = np.rint(gt_map[gx1:gx2, gy1:gy2])
                 gt_exp_local_grid = np.rint(gt_exp[gx1:gx2, gy1:gy2])
+                gt_free_local_grid = None
+                if "voxroom_navigation_free" in infos[0]:
+                    gt_free_local_grid = np.asarray(
+                        infos[0]["voxroom_navigation_free"],
+                        dtype=bool,
+                    )[gx1:gx2, gy1:gy2]
 
                 # plt.imshow(gt_map_local_grid.transpose())
                 # plt.plot(locs[1]*100/5, locs[0]*100/5, 'o', color = 'green')
@@ -1244,7 +1282,7 @@ def main():
                 plt.subplot(1,2,2)
                 plt.imshow(gt_door_local_map)
                 plt.show()"""
-                
+
                 c, r = absolute_locs[:-1]
                 global_loc_xy_pix = [round(r * 100.0 / args.map_resolution),
                                      round(c * 100.0 / args.map_resolution)]
@@ -1267,6 +1305,8 @@ def main():
                         p_input['goal'] = goal
                         p_input['map_pred'] = gt_map_local_grid
                         p_input['exp_pred'] = gt_exp_local_grid
+                        if gt_free_local_grid is not None:
+                            p_input['navigation_free_pred'] = gt_free_local_grid
                         p_input['pose_pred'] = planner_pose_inputs[0]
                         p_input['mid_out'] = True
                     loc_y = (planner_pose_inputs[0][0] - origins[0][0]) * 100 / 5
@@ -1301,6 +1341,8 @@ def main():
                             p_input['goal'] = goal
                             p_input['map_pred'] = gt_map_local_grid
                             p_input['exp_pred'] = gt_exp_local_grid
+                            if gt_free_local_grid is not None:
+                                p_input['navigation_free_pred'] = gt_free_local_grid
                             p_input['pose_pred'] = planner_pose_inputs[0]
                             p_input['mid_out'] = True
                     # print(total_dist)
@@ -1586,6 +1628,8 @@ def main():
                         p_input['goal'] = final_goal
                         p_input['map_pred'] = gt_map_local_grid
                         p_input['exp_pred'] = gt_exp_local_grid
+                        if gt_free_local_grid is not None:
+                            p_input['navigation_free_pred'] = gt_free_local_grid
                         p_input['pose_pred'] = planner_pose_inputs[0]
                         p_input['mid_out'] = True
                     output = envs.get_short_term_goal(planner_inputs_frontier)
@@ -2085,7 +2129,7 @@ def main():
 
 
 
-        
+
         # plt.close()
 
         """if action_count != 0:

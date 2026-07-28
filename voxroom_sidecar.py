@@ -18,6 +18,150 @@ REQUIRED_INFO_KEYS = (
 )
 
 
+def load_navigation_projection(path, expected_step, expected_shape):
+    projection_path = Path(path).resolve()
+    if not projection_path.is_file():
+        raise FileNotFoundError(
+            "VoxRoom navigation projection is missing: {}".format(projection_path)
+        )
+    expected_shape = tuple(int(value) for value in expected_shape)
+    if len(expected_shape) != 2 or min(expected_shape) < 1:
+        raise ValueError("Active Room navigation shape is invalid: {}".format(expected_shape))
+    with np.load(projection_path, allow_pickle=False) as payload:
+        required = {
+            "format_version",
+            "step",
+            "shape_hw",
+            "free_bits",
+            "occupied_bits",
+            "observed_bits",
+            "unknown_bits",
+            "resolution_m",
+            "bounds_xyxy_m",
+            "source",
+        }
+        missing = sorted(required.difference(payload.files))
+        if missing:
+            raise KeyError(
+                "VoxRoom navigation projection is missing keys: {}".format(missing)
+            )
+        format_version = int(np.asarray(payload["format_version"]).reshape(()))
+        step = int(np.asarray(payload["step"]).reshape(()))
+        shape = tuple(
+            int(value)
+            for value in np.asarray(payload["shape_hw"], dtype=np.int64).reshape(-1)
+        )
+        resolution_m = float(np.asarray(payload["resolution_m"]).reshape(()))
+        bounds = np.asarray(payload["bounds_xyxy_m"], dtype=np.float64).reshape(-1)
+        source = str(np.asarray(payload["source"]).reshape(()))
+        if format_version != 1:
+            raise RuntimeError(
+                "Unsupported VoxRoom navigation projection version {}".format(
+                    format_version
+                )
+            )
+        if step != int(expected_step):
+            raise RuntimeError(
+                "VoxRoom navigation projection step {} differs from expected {}".format(
+                    step,
+                    int(expected_step),
+                )
+            )
+        if shape != expected_shape:
+            raise RuntimeError(
+                "VoxRoom navigation shape {} differs from Active Room {}".format(
+                    shape,
+                    expected_shape,
+                )
+            )
+        if not np.isfinite(resolution_m) or resolution_m <= 0.0:
+            raise RuntimeError("VoxRoom navigation resolution is invalid")
+        if bounds.size != 4 or not np.all(np.isfinite(bounds)):
+            raise RuntimeError("VoxRoom navigation bounds are invalid")
+        expected_bounds = np.asarray(
+            [
+                -0.5 * shape[1] * resolution_m,
+                -0.5 * shape[0] * resolution_m,
+                0.5 * shape[1] * resolution_m,
+                0.5 * shape[0] * resolution_m,
+            ],
+            dtype=np.float64,
+        )
+        if not np.allclose(bounds, expected_bounds, atol=1.0e-6, rtol=0.0):
+            raise RuntimeError(
+                "VoxRoom navigation bounds {} differ from the centered Active Room map {}".format(
+                    bounds.tolist(),
+                    expected_bounds.tolist(),
+                )
+            )
+        if source != "mapper.last_voxel_navigation_projection":
+            raise RuntimeError(
+                "Unexpected VoxRoom navigation source: {}".format(source)
+            )
+        cell_count = int(shape[0] * shape[1])
+        masks = {}
+        for name in ("free", "occupied", "observed", "unknown"):
+            bits = np.asarray(payload[name + "_bits"], dtype=np.uint8).reshape(-1)
+            mask = np.unpackbits(bits, bitorder="little", count=cell_count)
+            masks[name] = mask.astype(bool, copy=False).reshape(shape)
+
+    if np.any(masks["free"] & masks["occupied"]):
+        raise RuntimeError("VoxRoom navigation marks cells both free and occupied")
+    if np.any(masks["unknown"] & (masks["free"] | masks["occupied"])):
+        raise RuntimeError("VoxRoom navigation unknown cells overlap known cells")
+    if np.any((masks["free"] | masks["occupied"]) & ~masks["observed"]):
+        raise RuntimeError("VoxRoom navigation has known cells outside observed")
+    if not np.array_equal(masks["unknown"], ~masks["observed"]):
+        raise RuntimeError("VoxRoom navigation unknown mask differs from inverse observed")
+    return {
+        "step": step,
+        "resolution_m": resolution_m,
+        "bounds_xyxy_m": bounds,
+        "free": np.flipud(masks["free"]).copy(),
+        "occupied": np.flipud(masks["occupied"]).copy(),
+        "observed": np.flipud(masks["observed"]).copy(),
+        "unknown": np.flipud(masks["unknown"]).copy(),
+        "source": source,
+    }
+
+
+def apply_navigation_projection(info, navigation):
+    if "gt_map" not in info or "gt_exp" not in info:
+        raise KeyError("Active Room info has no navigation map to replace")
+    expected_shape = np.asarray(info["gt_map"]).shape
+    if np.asarray(info["gt_exp"]).shape != expected_shape:
+        raise RuntimeError("Active Room obstacle and explored maps have different shapes")
+    for name in ("free", "occupied", "observed", "unknown"):
+        if np.asarray(navigation[name]).shape != expected_shape:
+            raise RuntimeError(
+                "VoxRoom {} map has shape {}, expected {}".format(
+                    name,
+                    np.asarray(navigation[name]).shape,
+                    expected_shape,
+                )
+            )
+    outside = (
+        navigation["observed"]
+        & ~navigation["free"]
+        & ~navigation["occupied"]
+    )
+    info["gt_map"] = np.asarray(
+        navigation["occupied"] | outside,
+        dtype=np.float32,
+    )
+    info["gt_exp"] = np.asarray(navigation["observed"], dtype=np.float32)
+    info["voxroom_navigation_free"] = np.asarray(
+        navigation["free"],
+        dtype=np.uint8,
+    )
+    info["voxroom_navigation_unknown"] = np.asarray(
+        navigation["unknown"],
+        dtype=np.uint8,
+    )
+    info["navigation_map_source"] = "voxroom_last_voxel_navigation_projection"
+    info["navigation_map_step"] = int(navigation["step"])
+
+
 class VoxRoomSidecarClient:
     def __init__(
         self,
@@ -40,6 +184,7 @@ class VoxRoomSidecarClient:
         self.last_step = -1
         self.last_simulator_step = -1
         self.latest_response = None
+        self.latest_navigation = None
         self.final_result = None
         self.closed = False
 
@@ -96,6 +241,9 @@ class VoxRoomSidecarClient:
         step = int(step)
         simulator_step = int(simulator_step)
         if simulator_step == self.last_simulator_step:
+            if self.latest_navigation is None:
+                raise RuntimeError("VoxRoom sidecar lost its navigation projection")
+            apply_navigation_projection(info, self.latest_navigation)
             return self.latest_response
         if simulator_step != self.last_simulator_step + 1:
             raise RuntimeError(
@@ -145,10 +293,17 @@ class VoxRoomSidecarClient:
             raise RuntimeError("VoxRoom worker update failed: {}".format(response))
         if int(response.get("step", -1)) != simulator_step:
             raise RuntimeError("VoxRoom worker acknowledged the wrong step: {}".format(response))
+        navigation = load_navigation_projection(
+            response.get("navigation_projection_path", ""),
+            expected_step=simulator_step,
+            expected_shape=np.asarray(info["gt_map"]).shape,
+        )
+        apply_navigation_projection(info, navigation)
         frame_path.unlink()
         self.last_step = step
         self.last_simulator_step = simulator_step
         self.latest_response = response
+        self.latest_navigation = navigation
         return response
 
     def latest_visualization(self):

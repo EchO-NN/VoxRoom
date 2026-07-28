@@ -92,8 +92,7 @@ def dashboard_panel_boxes(size):
     return {
         "rgb": (left, top, middle_x, middle_y),
         "map": (middle_x, top, right, middle_y),
-        "topology": (left, middle_y, middle_x, bottom),
-        "status": (middle_x, middle_y, right, bottom),
+        "voxroom": (left, middle_y, right, bottom),
     }
 
 

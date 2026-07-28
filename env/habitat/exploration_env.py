@@ -630,6 +630,16 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         grid = np.rint(map_pred)
         explored = np.rint(exp_pred)
+        navigation_free = inputs.get("navigation_free_pred")
+        if navigation_free is not None:
+            navigation_free = np.asarray(navigation_free, dtype=bool)
+            if navigation_free.shape != grid.shape:
+                raise RuntimeError(
+                    "VoxRoom navigation-free map has shape {}, expected {}".format(
+                        navigation_free.shape,
+                        grid.shape,
+                    )
+                )
 
         # Get pose prediction and global policy planning window
         start_x, start_y, start_o, gx1, gx2, gy1, gy2 = inputs['pose_pred']
@@ -696,7 +706,14 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.intrinsic_rew = -exp_pred[goal[0], goal[1]]
 
         # Get short-term goal
-        stg = self._get_stg(grid, explored, start, np.copy(goal), planning_window)
+        stg = self._get_stg(
+            grid,
+            explored,
+            start,
+            np.copy(goal),
+            planning_window,
+            navigation_free=navigation_free,
+        )
 
         # Find GT action
         if self.args.eval or not self.args.train_local:
@@ -882,7 +899,15 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         return episode_map
 
 
-    def _get_stg(self, grid, explored, start, goal, planning_window):
+    def _get_stg(
+        self,
+        grid,
+        explored,
+        start,
+        goal,
+        planning_window,
+        navigation_free=None,
+    ):
 
         [gx1, gx2, gy1, gy2] = planning_window
 
@@ -918,26 +943,41 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         y1 = max(y1, ey1)
         y2 = min(y2, ey2)
 
-        traversible = skimage.morphology.binary_dilation(
-                        grid[x1:x2, y1:y2],
-                        self.selem) != True
-        traversible[self.collison_map[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 0
-        traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
-
-        traversible[int(start[0]-x1)-1:int(start[0]-x1)+2,
-                    int(start[1]-y1)-1:int(start[1]-y1)+2] = 1
-
-        if goal[0]-2 > x1 and goal[0]+3 < x2\
-            and goal[1]-2 > y1 and goal[1]+3 < y2:
-            traversible[int(goal[0]-x1)-2:int(goal[0]-x1)+3,
-                    int(goal[1]-y1)-2:int(goal[1]-y1)+3] = 1
+        strict_voxroom_navigation = navigation_free is not None
+        if strict_voxroom_navigation:
+            navigation_free = np.asarray(navigation_free, dtype=bool)
+            if navigation_free.shape != grid.shape:
+                raise RuntimeError("VoxRoom navigation-free map shape changed during planning")
+            traversible = navigation_free[x1:x2, y1:y2].copy()
+            if not navigation_free[int(start[0]), int(start[1])]:
+                raise RuntimeError("Current agent cell is not free in the VoxRoom navigation map")
+            if not navigation_free[int(goal[0]), int(goal[1])]:
+                return (float(start[0]), float(start[1]))
         else:
-            goal[0] = min(max(x1, goal[0]), x2)
-            goal[1] = min(max(y1, goal[1]), y2)
+            traversible = skimage.morphology.binary_dilation(
+                            grid[x1:x2, y1:y2],
+                            self.selem) != True
+            traversible[self.collison_map[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 0
+            traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
+
+            traversible[int(start[0]-x1)-1:int(start[0]-x1)+2,
+                        int(start[1]-y1)-1:int(start[1]-y1)+2] = 1
+
+            if goal[0]-2 > x1 and goal[0]+3 < x2\
+                and goal[1]-2 > y1 and goal[1]+3 < y2:
+                traversible[int(goal[0]-x1)-2:int(goal[0]-x1)+3,
+                        int(goal[1]-y1)-2:int(goal[1]-y1)+3] = 1
+            else:
+                goal[0] = min(max(x1, goal[0]), x2)
+                goal[1] = min(max(y1, goal[1]), y2)
 
         def add_boundary(mat):
             h, w = mat.shape
-            new_mat = np.ones((h+2,w+2))
+            new_mat = (
+                np.zeros((h + 2, w + 2), dtype=mat.dtype)
+                if strict_voxroom_navigation
+                else np.ones((h + 2, w + 2))
+            )
             new_mat[1:h+1,1:w+1] = mat
             return new_mat
 
@@ -951,7 +991,8 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         for i in range(self.args.short_goal_dist):
             stg_x, stg_y, replan = planner.get_short_term_goal([stg_x, stg_y])
         if replan:
-
+            if strict_voxroom_navigation:
+                return (float(start[0]), float(start[1]))
             stg_x, stg_y = start[0], start[1]
 
         else:
