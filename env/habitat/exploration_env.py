@@ -56,6 +56,38 @@ HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
 )
 
 
+def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=2):
+    navigation_free = np.asarray(navigation_free, dtype=bool)
+    if navigation_free.ndim != 2 or navigation_free.size == 0:
+        raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
+    start = tuple(int(value) for value in start)
+    height, width = navigation_free.shape
+    if not (0 <= start[0] < height and 0 <= start[1] < width):
+        raise ValueError("start cell is outside the VoxRoom navigation map")
+    if navigation_free[start]:
+        return start
+    radius = int(max_radius_cells)
+    if radius < 0:
+        raise ValueError("VoxRoom start snap radius must be non-negative")
+    row0 = max(0, start[0] - radius)
+    row1 = min(height, start[0] + radius + 1)
+    col0 = max(0, start[1] - radius)
+    col1 = min(width, start[1] + radius + 1)
+    candidates = np.argwhere(navigation_free[row0:row1, col0:col1])
+    if candidates.size == 0:
+        raise RuntimeError(
+            "Current agent cell has no VoxRoom free anchor within {} cells".format(
+                radius
+            )
+        )
+    candidates[:, 0] += row0
+    candidates[:, 1] += col0
+    delta = candidates - np.asarray(start, dtype=np.int64)
+    distances = np.sum(delta * delta, axis=1)
+    selected = candidates[int(np.argmin(distances))]
+    return (int(selected[0]), int(selected[1]))
+
+
 def project_voxroom_goal_to_reachable_free(navigation_free, start, goal):
     navigation_free = np.asarray(navigation_free, dtype=bool)
     if navigation_free.ndim != 2 or navigation_free.size == 0:
@@ -63,12 +95,12 @@ def project_voxroom_goal_to_reachable_free(navigation_free, start, goal):
     start = tuple(int(value) for value in start)
     goal = tuple(int(value) for value in goal)
     height, width = navigation_free.shape
-    for name, cell in (("start", start), ("goal", goal)):
-        if not (0 <= cell[0] < height and 0 <= cell[1] < width):
-            raise ValueError("{} cell is outside the VoxRoom navigation map".format(name))
+    if not (0 <= start[0] < height and 0 <= start[1] < width):
+        raise ValueError("start cell is outside the VoxRoom navigation map")
+    if not (0 <= goal[0] < height and 0 <= goal[1] < width):
+        raise ValueError("goal cell is outside the VoxRoom navigation map")
     if not navigation_free[start]:
-        raise RuntimeError("Current agent cell is not free in the VoxRoom navigation map")
-
+        raise RuntimeError("VoxRoom projected start cell is not free")
     _, component_labels = cv2.connectedComponents(
         navigation_free.astype(np.uint8),
         connectivity=8,
@@ -947,6 +979,13 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             navigation_free = np.asarray(navigation_free, dtype=bool)
             if navigation_free.shape != grid.shape:
                 raise RuntimeError("VoxRoom navigation-free map shape changed during planning")
+            start = list(
+                snap_voxroom_start_to_free(
+                    navigation_free,
+                    start,
+                    max_radius_cells=2,
+                )
+            )
             projected_goal = project_voxroom_goal_to_reachable_free(
                 navigation_free,
                 start,

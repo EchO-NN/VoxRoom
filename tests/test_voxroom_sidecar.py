@@ -10,11 +10,31 @@ from env.habitat.exploration_env import (
     habitat_depth_to_meters,
     habitat_states_to_voxroom,
     project_voxroom_goal_to_reachable_free,
+    snap_voxroom_start_to_free,
 )
 from voxroom_sidecar import apply_navigation_projection, load_navigation_projection
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
+    def test_start_cell_snaps_only_within_two_voxroom_cells(self):
+        navigation_free = np.zeros((9, 9), dtype=bool)
+        navigation_free[4, 6] = True
+
+        snapped = snap_voxroom_start_to_free(
+            navigation_free,
+            start=(4, 4),
+            max_radius_cells=2,
+        )
+
+        self.assertEqual(snapped, (4, 6))
+
+        with self.assertRaisesRegex(RuntimeError, "no VoxRoom free anchor"):
+            snap_voxroom_start_to_free(
+                navigation_free,
+                start=(1, 1),
+                max_radius_cells=2,
+            )
+
     def test_frontier_goal_projects_to_nearest_start_component_free_cell(self):
         navigation_free = np.zeros((8, 10), dtype=bool)
         navigation_free[1:5, 1:4] = True
