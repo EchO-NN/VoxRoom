@@ -152,6 +152,43 @@ class Topomap_construction():
             "pending_transition": self._plain(self.pending_transition),
         }
 
+    def room_label_map(self, shape):
+        if len(shape) != 2:
+            raise ValueError("Room label map requires a two-dimensional shape")
+        height, width = (int(shape[0]), int(shape[1]))
+        if height <= 0 or width <= 0:
+            raise ValueError("Room label map dimensions must be positive")
+        labels = np.zeros((height, width), dtype=np.uint16)
+        for node_id in range(self.g.vcount()):
+            room_cells = self.g.vs[node_id]["room_exp"]
+            if not isinstance(room_cells, list):
+                raise TypeError("Topology room_exp must be a list")
+            if not room_cells:
+                continue
+            coordinates = np.asarray(room_cells)
+            if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+                raise RuntimeError(
+                    "Room {} contains malformed explored cells".format(node_id)
+                )
+            integer_coordinates = coordinates.astype(np.int64)
+            if not np.array_equal(coordinates, integer_coordinates):
+                raise RuntimeError(
+                    "Room {} contains non-integral explored cells".format(node_id)
+                )
+            rows = integer_coordinates[:, 0]
+            columns = integer_coordinates[:, 1]
+            if (
+                np.any(rows < 0)
+                or np.any(rows >= height)
+                or np.any(columns < 0)
+                or np.any(columns >= width)
+            ):
+                raise RuntimeError(
+                    "Room {} contains cells outside the global map".format(node_id)
+                )
+            labels[rows, columns] = node_id + 1
+        return labels
+
     def same_node_check(self, room_exp_list, detected_door_list): # map will be deleted soon
         target_node_idx_list = []
 

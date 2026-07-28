@@ -752,6 +752,9 @@ def main():
                 trajectory_xy.append(agent_xy)
             occupied = np.asarray(info["gt_map"]).transpose()
             explored = np.asarray(info["gt_exp"]).transpose()
+            room_labels = topo.room_label_map(
+                np.asarray(info["gt_map"]).shape
+            ).transpose()
             explored_ratio = float(info.get("exp_ratio") or 0.0)
             explored_area = float(info.get("exp_reward") or 0.0) * 50.0
             dashboard.render(
@@ -759,6 +762,7 @@ def main():
                 rgb=info["door_detection"],
                 occupied=occupied,
                 explored=explored,
+                room_labels=room_labels,
                 agent_xy=agent_xy,
                 heading_degrees=float(absolute_locs[2]),
                 goal_xy=goal_xy,

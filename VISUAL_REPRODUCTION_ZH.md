@@ -118,7 +118,9 @@ REQUIRE_TOPOLOGY_TRANSITION=0 MAX_EPISODE_STEPS=120 \
 - `topology_events.jsonl`：门、节点、边、出口选择和换房事件。
 - `topology_final.json`：最终可序列化拓扑图和严格模式结论。
 - `visualization_frames/`：完整仪表盘帧序列。
-- `visualization_final.png`：最终仪表盘。
+- `visualization_final.png`：最终仪表盘，右上角为按房间着色并自动放大的分割掩码。
+- `room_mask_final.png`：与原仓库演示一致的独立彩色房间掩码，黑色为障碍。
+- `room_labels_final.npz`：逐像素房间整数标签以及对应占用图、探索图。
 - `topology_replay.mp4`：由实际运行帧生成的回放。
 - `validation.json`：运行源码、验证器提交、窗口、图片、事件、耗时和闭环验证。
 - `runtime_install.json`：主仓库、DETR、Habitat/SG-Nav、CUDA 和门模型权重指纹。

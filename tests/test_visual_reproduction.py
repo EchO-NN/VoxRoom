@@ -177,6 +177,20 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertEqual(topology.g.vs[1]["room_entry"], [])
         self.assertEqual(topology.g.vs[1]["room_exp"], [])
 
+    def test_room_label_map_uses_original_room_exp_pixels(self):
+        topology = Topomap_construction(map_size=32)
+        topology._add_rooms(1)
+        topology.g.vs[0]["room_exp"] = [[2, 3], [2, 4], [3, 4]]
+        topology.g.vs[1]["room_exp"] = [[3, 4], [8, 9]]
+
+        labels = topology.room_label_map((12, 14))
+
+        self.assertEqual(labels.dtype, np.uint16)
+        self.assertEqual(labels[2, 3], 1)
+        self.assertEqual(labels[3, 4], 2)
+        self.assertEqual(labels[8, 9], 2)
+        self.assertEqual(labels[0, 0], 0)
+
     def test_dashboard_writes_frames_final_image_and_manifest(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -198,9 +212,12 @@ class VisualReproductionTests(unittest.TestCase):
             occupied[8:10, 8:50] = 1
             explored = np.zeros((64, 64), dtype=np.float32)
             explored[10:50, 10:50] = 1
+            room_labels = np.zeros((64, 64), dtype=np.uint16)
+            room_labels[10:30, 10:50] = 1
+            room_labels[30:50, 10:50] = 2
             topology = {
                 "current_node_id": 0,
-                "room_count": 1,
+                "room_count": 2,
                 "edge_count": 0,
                 "nodes": [
                     {
@@ -217,6 +234,7 @@ class VisualReproductionTests(unittest.TestCase):
                     rgb=np.full((64, 64, 3), 100 + step, dtype=np.uint8),
                     occupied=occupied,
                     explored=explored,
+                    room_labels=room_labels,
                     agent_xy=(20 + step, 20),
                     heading_degrees=30,
                     goal_xy=(40, 40),
@@ -246,6 +264,32 @@ class VisualReproductionTests(unittest.TestCase):
             self.assertEqual(manifest["final_image_size"], [1920, 1080])
             self.assertTrue((root / "visualization_final.png").is_file())
             self.assertTrue((root / "visualization_manifest.json").is_file())
+            self.assertTrue((root / "room_mask_final.png").is_file())
+            self.assertTrue((root / "room_labels_final.npz").is_file())
+            self.assertEqual(manifest["room_label_ids"], [1, 2])
+            self.assertEqual(
+                manifest["room_pixel_counts"],
+                {"1": 800, "2": 800},
+            )
+            with np.load(root / "room_labels_final.npz") as room_data:
+                np.testing.assert_array_equal(
+                    room_data["room_labels"],
+                    room_labels,
+                )
+                np.testing.assert_array_equal(
+                    room_data["occupied"],
+                    occupied,
+                )
+                np.testing.assert_array_equal(
+                    room_data["explored"],
+                    explored,
+                )
+            with Image.open(root / "room_mask_final.png") as room_image:
+                colors = np.unique(
+                    np.asarray(room_image.convert("RGB")).reshape(-1, 3),
+                    axis=0,
+                )
+                self.assertGreaterEqual(len(colors), 4)
             for step in (1, 2):
                 frame_path = (
                     root

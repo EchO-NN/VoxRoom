@@ -6,7 +6,9 @@ from collections import Counter, deque
 from pathlib import Path
 
 import numpy as np
+from matplotlib import patheffects
 from matplotlib.patches import Rectangle
+from PIL import Image
 
 from run_context_contract import (
     STRICT_CAPTURE_MARKER_HEIGHT,
@@ -96,6 +98,23 @@ class RuntimeDashboard:
         "explored": "#7f8c8d",
         "unexplored": "#f39c12",
     }
+    ROOM_COLORS = np.asarray(
+        [
+            (68, 199, 183),
+            (232, 62, 157),
+            (104, 174, 232),
+            (201, 178, 124),
+            (98, 185, 143),
+            (245, 132, 31),
+            (145, 104, 207),
+            (232, 111, 81),
+            (75, 155, 205),
+            (170, 194, 89),
+            (219, 129, 188),
+            (111, 184, 191),
+        ],
+        dtype=np.uint8,
+    )
 
     def __init__(
         self,
@@ -117,6 +136,9 @@ class RuntimeDashboard:
         self.frame_paths = []
         self.last_render_step = 0
         self.capture_marker_artists = []
+        self.last_occupied = None
+        self.last_explored = None
+        self.last_room_labels = None
 
         self.figure.clf()
         grid = self.figure.add_gridspec(
@@ -179,15 +201,62 @@ class RuntimeDashboard:
             self.figure.canvas.draw_idle()
             self.figure.canvas.flush_events()
 
-    @staticmethod
-    def _map_image(occupied, explored):
+    @classmethod
+    def _room_color(cls, label):
+        label = int(label)
+        if label < 1:
+            raise ValueError("Room labels must be positive")
+        return cls.ROOM_COLORS[(label - 1) % len(cls.ROOM_COLORS)]
+
+    @classmethod
+    def _room_mask_image(cls, occupied, explored, room_labels):
         occupied = np.asarray(occupied) > 0.5
         explored = np.asarray(explored) > 0.5
-        image = np.empty(occupied.shape + (3,), dtype=np.float32)
-        image[:] = (0.84, 0.86, 0.88)
-        image[explored] = (0.98, 0.98, 0.97)
-        image[occupied] = (0.12, 0.13, 0.15)
+        room_labels = np.asarray(room_labels)
+        if (
+            occupied.ndim != 2
+            or explored.shape != occupied.shape
+            or room_labels.shape != occupied.shape
+        ):
+            raise RuntimeError(
+                "Occupied, explored, and room-label maps must have one shape"
+            )
+        if not np.issubdtype(room_labels.dtype, np.integer):
+            raise TypeError("Room-label map must use an integer dtype")
+        if np.any(room_labels < 0):
+            raise RuntimeError("Room-label map contains negative labels")
+
+        image = np.full(occupied.shape + (3,), 255, dtype=np.uint8)
+        image[explored] = (232, 234, 236)
+        for label in np.unique(room_labels):
+            if label > 0:
+                image[room_labels == label] = cls._room_color(label)
+        image[occupied] = (20, 22, 24)
         return image
+
+    @staticmethod
+    def _map_bounds(occupied, explored, room_labels):
+        visible = (
+            (np.asarray(occupied) > 0.5)
+            | (np.asarray(explored) > 0.5)
+            | (np.asarray(room_labels) > 0)
+        )
+        points = np.argwhere(visible)
+        if points.size == 0:
+            raise RuntimeError("Room-mask visualization has no visible map cells")
+        height, width = visible.shape
+        row_min, column_min = points.min(axis=0)
+        row_max, column_max = points.max(axis=0)
+        margin = max(
+            8,
+            int(round(max(row_max - row_min + 1, column_max - column_min + 1) * 0.06)),
+        )
+        return (
+            max(0, int(column_min) - margin),
+            min(width, int(column_max) + margin + 1),
+            max(0, int(row_min) - margin),
+            min(height, int(row_max) + margin + 1),
+        )
 
     @staticmethod
     def _node_positions(nodes):
@@ -293,6 +362,7 @@ class RuntimeDashboard:
         self,
         occupied,
         explored,
+        room_labels,
         agent_xy,
         heading_degrees,
         goal_xy,
@@ -303,8 +373,11 @@ class RuntimeDashboard:
     ):
         axis = self.map_axis
         axis.clear()
-        axis.set_title("Online map and decisions")
-        axis.imshow(self._map_image(occupied, explored), interpolation="nearest")
+        axis.set_title("Colored room mask and decisions")
+        axis.imshow(
+            self._room_mask_image(occupied, explored, room_labels),
+            interpolation="nearest",
+        )
 
         if trajectory_xy:
             trajectory = np.asarray(trajectory_xy, dtype=np.float32)
@@ -375,6 +448,33 @@ class RuntimeDashboard:
                 length_includes_head=True,
                 zorder=6,
             )
+        for label in np.unique(room_labels):
+            if label <= 0:
+                continue
+            room_cells = np.argwhere(room_labels == label)
+            row, column = np.median(room_cells, axis=0)
+            text = axis.text(
+                column,
+                row,
+                "R{}".format(int(label) - 1),
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=11,
+                fontweight="bold",
+                zorder=7,
+            )
+            text.set_path_effects(
+                [patheffects.withStroke(linewidth=2.5, foreground="#202124")]
+            )
+        column_min, column_max, row_min, row_max = self._map_bounds(
+            occupied,
+            explored,
+            room_labels,
+        )
+        axis.set_xlim(column_min, column_max)
+        axis.set_ylim(row_max, row_min)
+        axis.set_aspect("equal")
         axis.set_xticks([])
         axis.set_yticks([])
 
@@ -453,6 +553,7 @@ class RuntimeDashboard:
         rgb,
         occupied,
         explored,
+        room_labels,
         agent_xy,
         heading_degrees,
         goal_xy,
@@ -468,6 +569,14 @@ class RuntimeDashboard:
         events,
     ):
         self.last_render_step = int(step)
+        self.last_occupied = np.asarray(occupied).copy()
+        self.last_explored = np.asarray(explored).copy()
+        self.last_room_labels = np.asarray(room_labels).copy()
+        self._room_mask_image(
+            self.last_occupied,
+            self.last_explored,
+            self.last_room_labels,
+        )
         self.rgb_axis.clear()
         self.rgb_axis.set_title("RGB and door detector")
         self.rgb_axis.imshow(np.asarray(rgb))
@@ -476,6 +585,7 @@ class RuntimeDashboard:
         self._draw_map(
             occupied,
             explored,
+            room_labels,
             agent_xy,
             heading_degrees,
             goal_xy,
@@ -521,8 +631,61 @@ class RuntimeDashboard:
             plt.pause(self.refresh_seconds)
 
     def finalize(self, topology_snapshot, event_summary):
+        if (
+            self.last_occupied is None
+            or self.last_explored is None
+            or self.last_room_labels is None
+        ):
+            raise RuntimeError("Cannot finalize without a rendered room mask")
         final_path = self.run_dir / "visualization_final.png"
         self._save_fixed_render(final_path, self.FINAL_DPI)
+        room_mask = self._room_mask_image(
+            self.last_occupied,
+            self.last_explored,
+            self.last_room_labels,
+        )
+        column_min, column_max, row_min, row_max = self._map_bounds(
+            self.last_occupied,
+            self.last_explored,
+            self.last_room_labels,
+        )
+        room_mask = room_mask[row_min:row_max, column_min:column_max]
+        scale = max(1, int(np.ceil(1600.0 / max(room_mask.shape[:2]))))
+        room_mask_image = Image.fromarray(room_mask, mode="RGB").resize(
+            (room_mask.shape[1] * scale, room_mask.shape[0] * scale),
+            Image.Resampling.NEAREST,
+        )
+        room_mask_path = self.run_dir / "room_mask_final.png"
+        room_mask_temporary = room_mask_path.with_name(
+            ".{}.{}.tmp".format(room_mask_path.name, os.getpid())
+        )
+        room_mask_image.save(room_mask_temporary, format="PNG")
+        os.replace(room_mask_temporary, room_mask_path)
+
+        room_labels_path = self.run_dir / "room_labels_final.npz"
+        room_labels_temporary = room_labels_path.with_name(
+            ".{}.{}.tmp".format(room_labels_path.name, os.getpid())
+        )
+        with room_labels_temporary.open("wb") as stream:
+            np.savez_compressed(
+                stream,
+                room_labels=self.last_room_labels,
+                occupied=self.last_occupied,
+                explored=self.last_explored,
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(room_labels_temporary, room_labels_path)
+
+        room_label_ids = [
+            int(label)
+            for label in np.unique(self.last_room_labels)
+            if label > 0
+        ]
+        room_pixel_counts = {
+            str(label): int(np.count_nonzero(self.last_room_labels == label))
+            for label in room_label_ids
+        }
         manifest = {
             "status": "completed",
             "last_render_step": self.last_render_step,
@@ -543,6 +706,19 @@ class RuntimeDashboard:
                 int(self.FIXED_RENDER_SIZE_INCHES[0] * self.FINAL_DPI),
                 int(self.FIXED_RENDER_SIZE_INCHES[1] * self.FINAL_DPI),
             ],
+            "room_mask_image": room_mask_path.name,
+            "room_mask_image_sha256": _sha256(room_mask_path),
+            "room_mask_image_size": list(room_mask_image.size),
+            "room_mask_bounds": [
+                column_min,
+                column_max,
+                row_min,
+                row_max,
+            ],
+            "room_labels_file": room_labels_path.name,
+            "room_labels_sha256": _sha256(room_labels_path),
+            "room_label_ids": room_label_ids,
+            "room_pixel_counts": room_pixel_counts,
             "topology": topology_snapshot,
             "events": event_summary,
         }

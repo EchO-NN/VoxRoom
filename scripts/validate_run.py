@@ -412,6 +412,8 @@ def main():
         "topology_events": run_dir / "topology_events.jsonl",
         "visualization_manifest": run_dir / "visualization_manifest.json",
         "visualization_final": run_dir / "visualization_final.png",
+        "room_mask_final": run_dir / "room_mask_final.png",
+        "room_labels_final": run_dir / "room_labels_final.npz",
         "replay_manifest": run_dir / "replay_manifest.json",
         "replay": run_dir / "topology_replay.mp4",
     }
@@ -790,6 +792,45 @@ def main():
         raise RuntimeError("Visualization event summary differs from the event stream")
     if visualization_manifest.get("topology") != snapshot:
         raise RuntimeError("Visualization topology differs from the final topology")
+    with np.load(paths["room_labels_final"], allow_pickle=False) as room_data:
+        if set(room_data.files) != {"room_labels", "occupied", "explored"}:
+            raise RuntimeError("Room-label artifact has unexpected arrays")
+        room_labels = room_data["room_labels"]
+        room_occupied = room_data["occupied"]
+        room_explored = room_data["explored"]
+    if (
+        room_labels.ndim != 2
+        or room_occupied.shape != room_labels.shape
+        or room_explored.shape != room_labels.shape
+    ):
+        raise RuntimeError("Room-label artifact arrays have inconsistent shapes")
+    if (
+        not np.issubdtype(room_labels.dtype, np.integer)
+        or np.any(room_labels < 0)
+    ):
+        raise RuntimeError("Room-label artifact contains invalid labels")
+    observed_room_labels = [
+        int(label) for label in np.unique(room_labels) if label > 0
+    ]
+    expected_room_labels = list(range(1, int(snapshot["room_count"]) + 1))
+    if observed_room_labels != expected_room_labels:
+        raise RuntimeError(
+            "Room-label artifact does not cover every topology room"
+        )
+    observed_room_pixel_counts = {
+        str(label): int(np.count_nonzero(room_labels == label))
+        for label in observed_room_labels
+    }
+    if (
+        visualization_manifest.get("room_label_ids") != observed_room_labels
+        or visualization_manifest.get("room_pixel_counts")
+        != observed_room_pixel_counts
+        or visualization_manifest.get("room_labels_file")
+        != paths["room_labels_final"].name
+        or visualization_manifest.get("room_labels_sha256")
+        != sha256(paths["room_labels_final"])
+    ):
+        raise RuntimeError("Room-label manifest does not match its raw arrays")
     if (
         visualization_manifest.get("capture_marker_scheme")
         != "sha256_run_step_v1"
@@ -914,6 +955,10 @@ def main():
             paths["visualization_final"],
             (960, 540),
         ),
+        "room_mask_final": check_image(
+            paths["room_mask_final"],
+            (320, 320),
+        ),
     }
     if context_mode:
         image_sizes["window_mid"] = check_image(
@@ -949,6 +994,7 @@ def main():
             "window_first",
             "window_later",
             "visualization_final",
+            "room_mask_final",
             *(
                 (
                     "window_mid",
@@ -1338,6 +1384,15 @@ def main():
         != image_hashes["visualization_final"]
     ):
         raise RuntimeError("Final visualization identity is inconsistent")
+    if (
+        visualization_manifest.get("room_mask_image")
+        != paths["room_mask_final"].name
+        or visualization_manifest.get("room_mask_image_sha256")
+        != image_hashes["room_mask_final"]
+        or visualization_manifest.get("room_mask_image_size")
+        != image_sizes["room_mask_final"]
+    ):
+        raise RuntimeError("Colored room-mask image identity is inconsistent")
     last_render_step = int(visualization_manifest.get("last_render_step", -1))
     if last_render_step != executed_steps:
         raise RuntimeError("Final dashboard render is not bound to run completion")
@@ -1519,6 +1574,8 @@ def main():
             "surviving_door_crossing_count"
         ],
         "topology_event_count": len(topology_events),
+        "room_label_ids": observed_room_labels,
+        "room_pixel_counts": observed_room_pixel_counts,
         "visualization_frame_count": frame_count,
         "window_viewable_checks": window_viewable_checks,
         "locked_window_size": recorded_window_size,
