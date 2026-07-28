@@ -139,6 +139,7 @@ class RuntimeDashboard:
         self.last_occupied = None
         self.last_explored = None
         self.last_room_labels = None
+        self.last_voxroom_image = None
 
         self.figure.clf()
         grid = self.figure.add_gridspec(
@@ -152,7 +153,9 @@ class RuntimeDashboard:
             hspace=0.2,
         )
         self.rgb_axis = self.figure.add_subplot(grid[0, 0])
-        self.map_axis = self.figure.add_subplot(grid[0, 1])
+        map_grid = grid[0, 1].subgridspec(1, 2, wspace=0.06)
+        self.map_axis = self.figure.add_subplot(map_grid[0, 0])
+        self.voxroom_axis = self.figure.add_subplot(map_grid[0, 1])
         self.topology_axis = self.figure.add_subplot(grid[1, 0])
         status_grid = grid[1, 1].subgridspec(
             2,
@@ -504,6 +507,30 @@ class RuntimeDashboard:
         axis.set_xticks([])
         axis.set_yticks([])
 
+    def _draw_voxroom(self, image):
+        axis = self.voxroom_axis
+        axis.clear()
+        axis.set_title("VoxRoom nvblox + learned room mask")
+        if image is None:
+            axis.set_facecolor("#eeeeee")
+            axis.text(
+                0.5,
+                0.5,
+                "VoxRoom sidecar disabled",
+                transform=axis.transAxes,
+                ha="center",
+                va="center",
+                color="#616161",
+                fontsize=10,
+            )
+        else:
+            value = np.asarray(image)
+            if value.ndim != 3 or value.shape[2] != 3:
+                raise ValueError("VoxRoom visualization must be an RGB image")
+            axis.imshow(value)
+        axis.set_xticks([])
+        axis.set_yticks([])
+
     def _draw_metrics(self, coverage_history, step, explored_ratio, explored_area):
         axis = self.metrics_axis
         axis.clear()
@@ -593,11 +620,15 @@ class RuntimeDashboard:
         explored_area,
         status,
         events,
+        voxroom_image=None,
     ):
         self.last_render_step = int(step)
         self.last_occupied = np.asarray(occupied).copy()
         self.last_explored = np.asarray(explored).copy()
         self.last_room_labels = np.asarray(room_labels).copy()
+        self.last_voxroom_image = (
+            None if voxroom_image is None else np.asarray(voxroom_image).copy()
+        )
         self._room_mask_image(
             self.last_occupied,
             self.last_explored,
@@ -625,6 +656,7 @@ class RuntimeDashboard:
             frontiers,
             trajectory_xy,
         )
+        self._draw_voxroom(self.last_voxroom_image)
         self._draw_topology(topology_snapshot)
         self._draw_metrics(
             coverage_history,
@@ -707,6 +739,17 @@ class RuntimeDashboard:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(room_labels_temporary, room_labels_path)
+        voxroom_image_path = None
+        if self.last_voxroom_image is not None:
+            voxroom_image_path = self.run_dir / "voxroom_visualization_final.png"
+            voxroom_image_temporary = voxroom_image_path.with_name(
+                ".{}.{}.tmp".format(voxroom_image_path.name, os.getpid())
+            )
+            Image.fromarray(self.last_voxroom_image, mode="RGB").save(
+                voxroom_image_temporary,
+                format="PNG",
+            )
+            os.replace(voxroom_image_temporary, voxroom_image_path)
 
         room_label_ids = [
             int(label)
@@ -748,6 +791,12 @@ class RuntimeDashboard:
             ],
             "room_labels_file": room_labels_path.name,
             "room_labels_sha256": _sha256(room_labels_path),
+            "voxroom_visualization_image": (
+                None if voxroom_image_path is None else voxroom_image_path.name
+            ),
+            "voxroom_visualization_sha256": (
+                None if voxroom_image_path is None else _sha256(voxroom_image_path)
+            ),
             "room_label_ids": room_label_ids,
             "room_pixel_counts": room_pixel_counts,
             "topology": topology_snapshot,

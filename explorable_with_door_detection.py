@@ -37,6 +37,7 @@ from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
 from time import perf_counter, time
 from visualization import RuntimeDashboard, TopologyEventRecorder
+from voxroom_sidecar import VoxRoomSidecarClient
 from run_context_contract import (
     STRICT_LIVE_FIGURE_DPI,
     STRICT_LIVE_FIGURE_SIZE_INCHES,
@@ -451,7 +452,9 @@ def main():
         "completion_reason": None,
         "last_dashboard_info": None,
         "last_dashboard_absolute_locs": None,
+        "voxroom_result": None,
     }
+    voxroom_sidecar = None
     runtime_timings = {}
     confirmed_crossing_evidence = []
 
@@ -501,6 +504,18 @@ def main():
         runtime_state["action"] = str(action)
 
     def append_progress(step, info):
+        voxroom_response = None
+        if voxroom_sidecar is not None:
+            voxroom_started_at = perf_counter()
+            voxroom_response = voxroom_sidecar.update(
+                int(step),
+                int(info["time"]),
+                info,
+            )
+            accumulate_timing(
+                "voxroom_sidecar",
+                perf_counter() - voxroom_started_at,
+            )
         topology_snapshot = (
             topology_provider["snapshot"]()
             if topology_provider["snapshot"] is not None
@@ -529,6 +544,14 @@ def main():
             ),
             "topology_room_count": int(topology_snapshot.get("room_count", 0)),
             "topology_edge_count": int(topology_snapshot.get("edge_count", 0)),
+            "voxroom_step": (
+                None if voxroom_response is None else int(voxroom_response["step"])
+            ),
+            "voxroom_room_count": (
+                None
+                if voxroom_response is None
+                else int(voxroom_response["room_count"])
+            ),
             "timestamp_unix": time(),
         }
         with progress_path.open("a", encoding="utf-8") as progress_file:
@@ -576,6 +599,21 @@ def main():
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
     obs, infos = envs.reset()
+    if args.voxroom_sidecar:
+        voxroom_sidecar = VoxRoomSidecarClient(
+            voxroom_root=args.voxroom_root,
+            config_path=args.voxroom_config,
+            run_dir=run_dir,
+            map_size_m=args.voxroom_map_size_m,
+            roomseg_every_steps=args.voxroom_roomseg_every_steps,
+            visualization_every_steps=args.voxroom_visualization_every_steps,
+            response_timeout_seconds=args.voxroom_response_timeout_seconds,
+        )
+        voxroom_sidecar.update(
+            0,
+            int(infos[0]["time"]),
+            infos[0],
+        )
     actual_episode_id = str(infos[0].get("episode_id", ""))
     actual_episode_contract_sha256 = str(
         infos[0].get("episode_contract_sha256", "")
@@ -629,6 +667,9 @@ def main():
             "actual_episode_contract_sha256": actual_episode_contract_sha256,
             "actual_scene_id": actual_scene_id,
             "x11_client_window_id": x11_client_window_id,
+            "voxroom_sidecar": bool(voxroom_sidecar is not None),
+            "voxroom_root": args.voxroom_root if args.voxroom_sidecar else None,
+            "voxroom_config": args.voxroom_config if args.voxroom_sidecar else None,
         }
     )
     write_json_atomic(run_dir / "run_metadata.json", run_metadata)
@@ -783,6 +824,11 @@ def main():
                     "frontier_count": len(frontiers or []),
                 },
                 events=event_recorder.latest_events(),
+                voxroom_image=(
+                    None
+                    if voxroom_sidecar is None
+                    else voxroom_sidecar.latest_visualization()
+                ),
             )
             if run_context is not None:
                 for stage_name, stage_step in STRICT_VISUAL_CAPTURE_STEPS:
@@ -1880,6 +1926,8 @@ def main():
             completion_reason=completion_reason,
             topology=topology_snapshot,
         )
+        if voxroom_sidecar is not None:
+            runtime_state["voxroom_result"] = voxroom_sidecar.close()
         if dashboard is not None:
             if (
                 runtime_state["last_dashboard_info"] is None
@@ -1988,6 +2036,8 @@ def main():
             ),
             "visualization_final": visualization_manifest.get("final_image"),
             "runtime_timing": timing_summary(),
+            "voxroom_sidecar": bool(voxroom_sidecar is not None),
+            "voxroom_result": runtime_state["voxroom_result"],
             "run_context": run_context,
             "x11_client_window_id": x11_client_window_id,
         }

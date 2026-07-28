@@ -24,6 +24,13 @@ VISUALIZATION_REFRESH_SECONDS="${VISUALIZATION_REFRESH_SECONDS:-0.01}"
 STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-900}"
 STALL_TIMEOUT_SECONDS="${STALL_TIMEOUT_SECONDS:-300}"
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-$((MAX_EPISODE_STEPS * 30 + 900))}"
+VOXROOM_SIDECAR="${VOXROOM_SIDECAR:-0}"
+VOXROOM_ROOT="${VOXROOM_ROOT:-}"
+VOXROOM_CONFIG="${VOXROOM_CONFIG:-}"
+VOXROOM_MAP_SIZE_M="${VOXROOM_MAP_SIZE_M:-48.0}"
+VOXROOM_ROOMSEG_EVERY_STEPS="${VOXROOM_ROOMSEG_EVERY_STEPS:-5}"
+VOXROOM_VISUALIZATION_EVERY_STEPS="${VOXROOM_VISUALIZATION_EVERY_STEPS:-5}"
+VOXROOM_RESPONSE_TIMEOUT_SECONDS="${VOXROOM_RESPONSE_TIMEOUT_SECONDS:-300}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "Python environment is missing: $PYTHON" >&2
@@ -56,6 +63,25 @@ if [[ "$RUN_CONTEXT_REQUIRED" != "0" \
     && "$RUN_CONTEXT_REQUIRED" != "1" ]]; then
     echo "RUN_CONTEXT_REQUIRED must be 0 or 1" >&2
     exit 1
+fi
+if [[ "$VOXROOM_SIDECAR" != "0" && "$VOXROOM_SIDECAR" != "1" ]]; then
+    echo "VOXROOM_SIDECAR must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$VOXROOM_SIDECAR" == "1" ]]; then
+    if [[ -z "$VOXROOM_ROOT" ]]; then
+        echo "VOXROOM_ROOT is required when VOXROOM_SIDECAR=1" >&2
+        exit 1
+    fi
+    VOXROOM_CONFIG="${VOXROOM_CONFIG:-$VOXROOM_ROOT/configs/voxroom_online.yaml}"
+    if [[ ! -x "$VOXROOM_ROOT/scripts/run_voxroom_isaac_env.sh" ]]; then
+        echo "VoxRoom launcher is missing: $VOXROOM_ROOT/scripts/run_voxroom_isaac_env.sh" >&2
+        exit 1
+    fi
+    if [[ ! -f "$VOXROOM_CONFIG" ]]; then
+        echo "VoxRoom config is missing: $VOXROOM_CONFIG" >&2
+        exit 1
+    fi
 fi
 if [[ ! "$WINDOW_CHECKPOINT_EVERY_STEPS" =~ ^[1-9][0-9]*$ ]]; then
     echo "WINDOW_CHECKPOINT_EVERY_STEPS must be a positive integer" >&2
@@ -223,6 +249,18 @@ if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
         --run_context_dataset "$RUN_DIR/input_dataset.json.gz"
     )
 fi
+voxroom_args=(--voxroom_sidecar 0)
+if [[ "$VOXROOM_SIDECAR" == "1" ]]; then
+    voxroom_args=(
+        --voxroom_sidecar 1
+        --voxroom_root "$VOXROOM_ROOT"
+        --voxroom_config "$VOXROOM_CONFIG"
+        --voxroom_map_size_m "$VOXROOM_MAP_SIZE_M"
+        --voxroom_roomseg_every_steps "$VOXROOM_ROOMSEG_EVERY_STEPS"
+        --voxroom_visualization_every_steps "$VOXROOM_VISUALIZATION_EVERY_STEPS"
+        --voxroom_response_timeout_seconds "$VOXROOM_RESPONSE_TIMEOUT_SECONDS"
+    )
+fi
 command=(
     "$PYTHON" -u "$ROOT_DIR/explorable_with_door_detection.py"
     --task_config "$TASK_CONFIG"
@@ -252,6 +290,7 @@ command=(
     --dump_location "$RUN_DIR"
     --exp_name native
     "${run_context_args[@]}"
+    "${voxroom_args[@]}"
 )
 printf '%q ' "${command[@]}" >"$RUN_DIR/command.txt"
 printf '\n' >>"$RUN_DIR/command.txt"

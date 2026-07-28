@@ -166,6 +166,29 @@ def get_args():
         default=str(Path(__file__).resolve().parent / "third_party" / "detr"),
         help='path to the pinned facebookresearch/detr checkout',
     )
+    parser.add_argument(
+        '--voxroom_sidecar',
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help='synchronously run the strict VoxRoom nvblox and room-segmentation sidecar',
+    )
+    parser.add_argument(
+        '--voxroom_root',
+        type=str,
+        default=os.environ.get('VOXROOM_ROOT', ''),
+        help='VoxRoom source root used by the sidecar worker',
+    )
+    parser.add_argument(
+        '--voxroom_config',
+        type=str,
+        default=os.environ.get('VOXROOM_CONFIG', ''),
+        help='VoxRoom production YAML used by the sidecar worker',
+    )
+    parser.add_argument('--voxroom_map_size_m', type=float, default=48.0)
+    parser.add_argument('--voxroom_roomseg_every_steps', type=int, default=5)
+    parser.add_argument('--voxroom_visualization_every_steps', type=int, default=5)
+    parser.add_argument('--voxroom_response_timeout_seconds', type=float, default=300.0)
 
     # Environment, dataset and episode specifications
     parser.add_argument('-efw', '--env_frame_width', type=int, default=256,  # 256 this is the resolution of the scene
@@ -274,6 +297,27 @@ def get_args():
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     args.detr_source_dir = str(Path(args.detr_source_dir).expanduser().resolve())
     args.run_dir = str(Path(args.run_dir).expanduser().resolve())
+    if args.voxroom_sidecar:
+        if not args.voxroom_root:
+            raise ValueError("--voxroom_root is required when --voxroom_sidecar=1")
+        args.voxroom_root = str(Path(args.voxroom_root).expanduser().resolve())
+        if not args.voxroom_config:
+            args.voxroom_config = str(
+                Path(args.voxroom_root) / "configs" / "voxroom_online.yaml"
+            )
+        args.voxroom_config = str(Path(args.voxroom_config).expanduser().resolve())
+        if not Path(args.voxroom_root).is_dir():
+            raise FileNotFoundError("VoxRoom root does not exist: {}".format(args.voxroom_root))
+        if not Path(args.voxroom_config).is_file():
+            raise FileNotFoundError("VoxRoom config does not exist: {}".format(args.voxroom_config))
+        if args.voxroom_map_size_m <= 0.0:
+            raise ValueError("--voxroom_map_size_m must be positive")
+        if args.voxroom_roomseg_every_steps < 1:
+            raise ValueError("--voxroom_roomseg_every_steps must be positive")
+        if args.voxroom_visualization_every_steps < 1:
+            raise ValueError("--voxroom_visualization_every_steps must be positive")
+        if args.voxroom_response_timeout_seconds <= 0.0:
+            raise ValueError("--voxroom_response_timeout_seconds must be positive")
     if args.run_context_manifest:
         args.run_context_manifest = str(
             Path(args.run_context_manifest).expanduser().resolve()

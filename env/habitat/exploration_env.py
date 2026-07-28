@@ -38,6 +38,86 @@ from env.habitat.utils.supervision import HabitatMaps
 from model import get_grid
 
 
+HABITAT_WORLD_TO_VOXROOM = np.asarray(
+    [
+        [0.0, 0.0, -1.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
+    [
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+
+
+def habitat_depth_to_meters(depth, minimum_depth_m, maximum_depth_m, normalized):
+    values = np.asarray(depth, dtype=np.float32)
+    if values.ndim == 3 and values.shape[2] == 1:
+        values = values[:, :, 0]
+    if values.ndim != 2 or values.size == 0:
+        raise ValueError("Habitat depth must be a non-empty HxW or HxWx1 array")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Habitat depth contains non-finite values")
+    if normalized:
+        if float(np.min(values)) < 0.0 or float(np.max(values)) > 1.0:
+            raise ValueError("Normalized Habitat depth is outside [0, 1]")
+        values = (
+            float(minimum_depth_m)
+            + values * (float(maximum_depth_m) - float(minimum_depth_m))
+        )
+    elif float(np.min(values)) < float(minimum_depth_m):
+        raise ValueError("Metric Habitat depth is below the configured minimum")
+    return values.astype(np.float32, copy=True)
+
+
+def habitat_states_to_voxroom(agent_state, sensor_state, origin_habitat):
+    origin = np.asarray(origin_habitat, dtype=np.float64).reshape(3)
+    agent_position_h = np.asarray(agent_state.position, dtype=np.float64).reshape(3)
+    sensor_position_h = np.asarray(sensor_state.position, dtype=np.float64).reshape(3)
+    agent_rotation_h = quaternion.as_rotation_matrix(agent_state.rotation)
+    sensor_rotation_h = quaternion.as_rotation_matrix(sensor_state.rotation)
+
+    base_position = HABITAT_WORLD_TO_VOXROOM @ (agent_position_h - origin)
+    forward_h = agent_rotation_h @ np.asarray([0.0, 0.0, -1.0], dtype=np.float64)
+    forward_v = HABITAT_WORLD_TO_VOXROOM @ forward_h
+    yaw = math.atan2(float(forward_v[1]), float(forward_v[0]))
+    base_pose = np.asarray(
+        [base_position[0], base_position[1], base_position[2], yaw],
+        dtype=np.float64,
+    )
+
+    camera_transform = np.eye(4, dtype=np.float64)
+    camera_transform[:3, :3] = (
+        HABITAT_WORLD_TO_VOXROOM
+        @ sensor_rotation_h
+        @ HABITAT_CAMERA_NATIVE_TO_FLU
+    )
+    camera_transform[:3, 3] = (
+        HABITAT_WORLD_TO_VOXROOM @ (sensor_position_h - origin)
+    )
+    if not np.allclose(
+        camera_transform[:3, :3].T @ camera_transform[:3, :3],
+        np.eye(3),
+        atol=1.0e-6,
+        rtol=0.0,
+    ):
+        raise RuntimeError("Habitat-to-VoxRoom camera rotation is not orthonormal")
+    if not np.isclose(
+        np.linalg.det(camera_transform[:3, :3]),
+        1.0,
+        atol=1.0e-6,
+        rtol=0.0,
+    ):
+        raise RuntimeError("Habitat-to-VoxRoom camera rotation determinant is not +1")
+    return base_pose, camera_transform
+
+
 def _preprocess_depth(depth):
     depth = depth[:, :, 0]*1
     mask2 = depth > 0.99#0.99
@@ -64,6 +144,12 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
                                                 ))
 
         self.args = args
+        depth_config = config_env.SIMULATOR.DEPTH_SENSOR
+        self.voxroom_bridge_enabled = bool(args.voxroom_sidecar)
+        self.voxroom_depth_min_m = float(depth_config.MIN_DEPTH)
+        self.voxroom_depth_max_m = float(depth_config.MAX_DEPTH)
+        self.voxroom_depth_normalized = bool(depth_config.NORMALIZE_DEPTH)
+        self.voxroom_origin_habitat = None
         self.num_actions = 3
         self.dt = 10
 
@@ -157,6 +243,12 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             obs = super().reset()
             full_map_size = args.map_size_cm//args.map_resolution
             self.explorable_map = self._get_gt_map(full_map_size)
+        if self.voxroom_bridge_enabled:
+            agent_state = self._env.sim.get_agent_state(0)
+            self.voxroom_origin_habitat = np.asarray(
+                agent_state.position,
+                dtype=np.float64,
+            ).copy()
 
         self.prev_explored_area = 0.
 
@@ -211,6 +303,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['scene_name'] = self.scene_name
         self.info['episode_id'] = self.episode_id
         self.info['episode_contract_sha256'] = self.episode_contract_sha256
+        self.info.update(self._voxroom_payload(obs["depth"]))
 
 
         self.save_position()
@@ -250,6 +343,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         #print('obs {}'.format(obs.keys()))
         # Preprocess observations
         rgb = obs['rgb'].astype(np.uint8)
+        voxroom_payload = self._voxroom_payload(obs["depth"])
         self.obs = rgb # For visualization
         if self.args.frame_width != self.args.env_frame_width:
             rgb = np.asarray(self.res(rgb))
@@ -323,6 +417,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['door_local_map'] = door_only_map
         self.info['depth'] = depth
         self.info['door_mask'] = door_frame_mask
+        self.info.update(voxroom_payload)
 
         # Update collision map
         if action == 1:
@@ -389,6 +484,44 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
                 done = False"""
 
         return state, rew, done, self.info
+
+    def _voxroom_payload(self, raw_depth):
+        if not self.voxroom_bridge_enabled:
+            return {}
+        if self.voxroom_origin_habitat is None:
+            raise RuntimeError("VoxRoom bridge origin was not initialized")
+        agent_state = self._env.sim.get_agent_state(0)
+        if "depth" not in agent_state.sensor_states:
+            raise RuntimeError("Habitat agent state has no depth sensor state")
+        depth_state = agent_state.sensor_states["depth"]
+        depth_m = habitat_depth_to_meters(
+            raw_depth,
+            self.voxroom_depth_min_m,
+            self.voxroom_depth_max_m,
+            self.voxroom_depth_normalized,
+        )
+        base_pose, camera_transform = habitat_states_to_voxroom(
+            agent_state,
+            depth_state,
+            self.voxroom_origin_habitat,
+        )
+        height, width = depth_m.shape
+        fx = (width * 0.5) / math.tan(math.radians(float(self.args.hfov)) * 0.5)
+        fy = fx
+        return {
+            "voxroom_depth_m": depth_m,
+            "voxroom_intrinsics_fx_fy_cx_cy": np.asarray(
+                [fx, fy, (width - 1) * 0.5, (height - 1) * 0.5],
+                dtype=np.float64,
+            ),
+            "voxroom_intrinsics_width_height": np.asarray(
+                [width, height],
+                dtype=np.int32,
+            ),
+            "voxroom_base_pose_world_xyzyaw": base_pose,
+            "voxroom_camera_transform_world": camera_transform,
+            "voxroom_geometry_contract": "habitat_exact_sensor_se3_to_voxroom_flu_v1",
+        }
 
     def get_reward_range(self):
         # This function is not used, Habitat-RLEnv requires this function
