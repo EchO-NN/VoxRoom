@@ -754,7 +754,7 @@ def main():
             explored = np.asarray(info["gt_exp"]).transpose()
             room_labels = topo.room_label_map(
                 np.asarray(info["gt_map"]).shape
-            ).transpose()
+            )
             explored_ratio = float(info.get("exp_ratio") or 0.0)
             explored_area = float(info.get("exp_reward") or 0.0) * 50.0
             dashboard.render(

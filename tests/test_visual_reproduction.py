@@ -314,6 +314,20 @@ class VisualReproductionTests(unittest.TestCase):
                     2,
                 )
 
+    def test_dashboard_rejects_transposed_room_labels(self):
+        occupied = np.zeros((20, 20), dtype=np.float32)
+        explored = np.zeros((20, 20), dtype=np.float32)
+        explored[2:8, 11:18] = 1
+        room_labels = np.zeros((20, 20), dtype=np.uint16)
+        room_labels[11:18, 2:8] = 1
+
+        with self.assertRaisesRegex(RuntimeError, "misaligned"):
+            RuntimeDashboard._validate_room_alignment(
+                occupied,
+                explored,
+                room_labels,
+            )
+
     def test_fixed_render_is_independent_of_live_figure_reflow(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

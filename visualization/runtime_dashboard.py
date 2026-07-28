@@ -259,6 +259,30 @@ class RuntimeDashboard:
         )
 
     @staticmethod
+    def _validate_room_alignment(occupied, explored, room_labels):
+        occupied = np.asarray(occupied) > 0.5
+        explored = np.asarray(explored) > 0.5
+        labeled = np.asarray(room_labels) > 0
+        labeled_count = int(np.count_nonzero(labeled))
+        if labeled_count == 0:
+            return
+        occupied_overlap = int(np.count_nonzero(labeled & occupied))
+        if occupied_overlap:
+            raise RuntimeError(
+                "Room labels overlap {} occupied map cells".format(
+                    occupied_overlap
+                )
+            )
+        explored_overlap = int(np.count_nonzero(labeled & explored))
+        overlap_ratio = explored_overlap / labeled_count
+        if overlap_ratio < 0.98:
+            raise RuntimeError(
+                "Room labels are misaligned with the explored map: {:.3f}".format(
+                    overlap_ratio
+                )
+            )
+
+    @staticmethod
     def _node_positions(nodes):
         count = len(nodes)
         if count == 0:
@@ -573,6 +597,11 @@ class RuntimeDashboard:
         self.last_explored = np.asarray(explored).copy()
         self.last_room_labels = np.asarray(room_labels).copy()
         self._room_mask_image(
+            self.last_occupied,
+            self.last_explored,
+            self.last_room_labels,
+        )
+        self._validate_room_alignment(
             self.last_occupied,
             self.last_explored,
             self.last_room_labels,

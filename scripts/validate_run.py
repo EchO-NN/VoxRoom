@@ -821,6 +821,22 @@ def main():
         str(label): int(np.count_nonzero(room_labels == label))
         for label in observed_room_labels
     }
+    labeled_room_cells = room_labels > 0
+    occupied_room_overlap = int(
+        np.count_nonzero(labeled_room_cells & (room_occupied > 0.5))
+    )
+    if occupied_room_overlap:
+        raise RuntimeError("Room labels overlap occupied map cells")
+    explored_room_overlap = int(
+        np.count_nonzero(labeled_room_cells & (room_explored > 0.5))
+    )
+    room_alignment_ratio = (
+        explored_room_overlap / int(np.count_nonzero(labeled_room_cells))
+    )
+    if room_alignment_ratio < 0.98:
+        raise RuntimeError(
+            "Room labels are misaligned with the explored map"
+        )
     if (
         visualization_manifest.get("room_label_ids") != observed_room_labels
         or visualization_manifest.get("room_pixel_counts")
@@ -1576,6 +1592,8 @@ def main():
         "topology_event_count": len(topology_events),
         "room_label_ids": observed_room_labels,
         "room_pixel_counts": observed_room_pixel_counts,
+        "room_alignment_ratio": room_alignment_ratio,
+        "occupied_room_overlap": occupied_room_overlap,
         "visualization_frame_count": frame_count,
         "window_viewable_checks": window_viewable_checks,
         "locked_window_size": recorded_window_size,
