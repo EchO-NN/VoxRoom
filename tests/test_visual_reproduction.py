@@ -166,6 +166,15 @@ class VisualReproductionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             topology.snapshot()
 
+    def test_controlled_room_creation_initializes_topology_contract(self):
+        topology = Topomap_construction(map_size=32)
+
+        topology._add_rooms(1)
+
+        self.assertEqual(topology.g.vs[1]["room_status"], "unexplored")
+        self.assertEqual(topology.g.vs[1]["room_entry"], [])
+        self.assertEqual(topology.g.vs[1]["room_exp"], [])
+
     def test_dashboard_writes_frames_final_image_and_manifest(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

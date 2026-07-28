@@ -83,6 +83,9 @@ class Topomap_construction():
         )
         for vertex_idx in added_vertex_ids:
             self.g.vs[vertex_idx]["stable_id"] = self.next_room_stable_id
+            self.g.vs[vertex_idx]["room_status"] = "unexplored"
+            self.g.vs[vertex_idx]["room_entry"] = []
+            self.g.vs[vertex_idx]["room_exp"] = []
             self.next_room_stable_id += 1
         self._validate_stable_ids()
         return added_vertex_ids
