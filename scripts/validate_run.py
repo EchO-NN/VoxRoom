@@ -9,12 +9,26 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
+import numpy as np
 from PIL import Image, ImageChops, ImageStat
+from scipy.fft import dctn
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
-from run_context_contract import episode_contract_sha256
+from run_context_contract import (
+    STRICT_CAPTURE_MARKER_HEIGHT,
+    STRICT_CAPTURE_MARKER_PAYLOAD_BITS,
+    STRICT_CAPTURE_MARKER_SYNC,
+    STRICT_CAPTURE_MARKER_WIDTH,
+    STRICT_CAPTURE_MARKER_X,
+    STRICT_CAPTURE_MARKER_Y,
+    STRICT_LIVE_CANVAS_SIZE,
+    STRICT_VISUAL_CAPTURE_STEPS,
+    episode_contract_sha256,
+    strict_capture_marker_bits,
+)
 from topology_contract import (
     crossing_evidence_survives,
     surviving_crossing_count,
@@ -35,6 +49,7 @@ EXPECTED_GIBSON_CONTEXT = {
     "pointnav_required_scene_count": 86,
     "available_scene_count": 492,
 }
+DASHBOARD_PHASH_MIN_DISTANCE = 12
 
 
 def sha256(path):
@@ -86,9 +101,143 @@ def dashboard_panel_signature(path):
     with Image.open(path) as image:
         dashboard = image.convert("RGB")
     return {
-        name: hashlib.sha256(dashboard.crop(box).tobytes()).hexdigest()
+        name: dashboard_panel_perceptual_hash(dashboard.crop(box))
         for name, box in dashboard_panel_boxes(dashboard.size).items()
     }
+
+
+def dashboard_panel_perceptual_hash(panel):
+    pixels = np.asarray(
+        panel.convert("L").resize(
+            (64, 64),
+            Image.Resampling.LANCZOS,
+        ),
+        dtype=np.float32,
+    )
+    coefficients = dctn(pixels, norm="ortho")[:16, :16]
+    threshold = float(np.median(coefficients.reshape(-1)[1:]))
+    bits = coefficients > threshold
+    return np.packbits(bits.reshape(-1)).tobytes().hex()
+
+
+def perceptual_hash_distance(first, second):
+    if len(first) != len(second):
+        raise RuntimeError("Perceptual hashes have inconsistent lengths")
+    return sum(
+        bin(left ^ right).count("1")
+        for left, right in zip(bytes.fromhex(first), bytes.fromhex(second))
+    )
+
+
+def require_distinct_panel_signatures(signatures, label):
+    for first_index, first in enumerate(signatures):
+        for second in signatures[first_index + 1 :]:
+            distances = {
+                name: perceptual_hash_distance(first[name], second[name])
+                for name in first
+            }
+            if max(distances.values()) < DASHBOARD_PHASH_MIN_DISTANCE:
+                raise RuntimeError(
+                    "{} contain scale-equivalent frozen panels".format(label)
+                )
+
+
+def decode_capture_marker(path, canvas_size=None):
+    with Image.open(path) as source:
+        image = source.convert("L")
+    if canvas_size is None:
+        canvas_width, canvas_height = image.size
+    else:
+        canvas_width, canvas_height = map(int, canvas_size)
+        if image.width < canvas_width or image.height < canvas_height:
+            raise RuntimeError(
+                "{} is smaller than its declared dashboard canvas".format(path)
+            )
+        image = image.crop((0, 0, canvas_width, canvas_height))
+    bit_count = len(STRICT_CAPTURE_MARKER_SYNC) + (
+        STRICT_CAPTURE_MARKER_PAYLOAD_BITS
+    )
+    bit_width = STRICT_CAPTURE_MARKER_WIDTH / bit_count
+    y0 = int(
+        (1.0 - STRICT_CAPTURE_MARKER_Y - 0.72 * STRICT_CAPTURE_MARKER_HEIGHT)
+        * canvas_height
+    )
+    y1 = int(
+        (1.0 - STRICT_CAPTURE_MARKER_Y - 0.28 * STRICT_CAPTURE_MARKER_HEIGHT)
+        * canvas_height
+    )
+    if y1 <= y0:
+        raise RuntimeError("Capture marker sampling height collapsed")
+    bits = []
+    for index in range(bit_count):
+        center_x = (
+            STRICT_CAPTURE_MARKER_X + (index + 0.5) * bit_width
+        ) * canvas_width
+        half_sample_width = max(1.0, 0.18 * bit_width * canvas_width)
+        x0 = int(center_x - half_sample_width)
+        x1 = int(center_x + half_sample_width)
+        if x1 <= x0:
+            raise RuntimeError("Capture marker sampling width collapsed")
+        value = float(np.asarray(image.crop((x0, y0, x1, y1))).mean())
+        bits.append(1 if value < 128.0 else 0)
+    return tuple(bits)
+
+
+def check_capture_marker(path, run_id, step, canvas_size=None):
+    expected = strict_capture_marker_bits(run_id, step)
+    observed = decode_capture_marker(path, canvas_size=canvas_size)
+    if observed != expected:
+        raise RuntimeError(
+            "{} is not pixel-bound to run {} step {}".format(
+                path,
+                run_id,
+                step,
+            )
+        )
+    return "".join(str(bit) for bit in observed)
+
+
+def validate_capture_receipt(
+    receipt_path,
+    *,
+    expected,
+    run_dir,
+    expected_window_size,
+):
+    receipt = json.loads(receipt_path.read_text())
+    captured_at_unix = receipt.pop("captured_at_unix", None)
+    if (
+        not isinstance(captured_at_unix, (int, float))
+        or not 0 < float(captured_at_unix) <= time.time() + 5.0
+    ):
+        raise RuntimeError("Capture receipt has an invalid timestamp")
+    window_path = run_dir / expected["window_file"]
+    frame_path = run_dir / expected["frame_file"]
+    expected_receipt = {
+        **expected,
+        "window_sha256": sha256(window_path),
+        "window_size": list(expected_window_size),
+    }
+    if receipt != expected_receipt:
+        raise RuntimeError("Capture receipt identity or pixels changed")
+    if sha256(frame_path) != expected["frame_sha256"]:
+        raise RuntimeError("Capture receipt rendered-frame SHA256 changed")
+    return {
+        **receipt,
+        "captured_at_unix": float(captured_at_unix),
+    }
+
+
+def check_dashboard_nonblank(path):
+    with Image.open(path) as image:
+        dashboard = image.convert("RGB")
+    stddev = {}
+    for name, box in dashboard_panel_boxes(dashboard.size).items():
+        panel_stddev = max(ImageStat.Stat(dashboard.crop(box)).stddev)
+        if panel_stddev < 2.0:
+            raise RuntimeError("{} dashboard panel is blank".format(name))
+        stddev[name] = panel_stddev
+    return stddev
 
 
 def check_dashboard_panels(first_path, terminal_path):
@@ -96,24 +245,34 @@ def check_dashboard_panels(first_path, terminal_path):
         first = first_image.convert("RGB")
     with Image.open(terminal_path) as terminal_image:
         terminal = terminal_image.convert("RGB")
-    if first.size != terminal.size:
-        raise RuntimeError("Dashboard captures changed dimensions")
-    boxes = dashboard_panel_boxes(first.size)
+    first_boxes = dashboard_panel_boxes(first.size)
+    terminal_boxes = dashboard_panel_boxes(terminal.size)
     metrics = {}
-    for name, box in boxes.items():
-        first_panel = first.crop(box)
-        terminal_panel = terminal.crop(box)
+    for name in first_boxes:
+        first_panel = first.crop(first_boxes[name]).resize(
+            (640, 360),
+            Image.Resampling.BILINEAR,
+        )
+        terminal_panel = terminal.crop(terminal_boxes[name]).resize(
+            (640, 360),
+            Image.Resampling.BILINEAR,
+        )
         terminal_stddev = max(ImageStat.Stat(terminal_panel).stddev)
         difference_mean = max(
             ImageStat.Stat(ImageChops.difference(first_panel, terminal_panel)).mean
         )
+        perceptual_distance = perceptual_hash_distance(
+            dashboard_panel_perceptual_hash(first_panel),
+            dashboard_panel_perceptual_hash(terminal_panel),
+        )
         if terminal_stddev < 2.0:
             raise RuntimeError("{} dashboard panel is blank".format(name))
-        if difference_mean < 0.75:
+        if perceptual_distance < DASHBOARD_PHASH_MIN_DISTANCE:
             raise RuntimeError("{} dashboard panel did not change".format(name))
         metrics[name] = {
             "terminal_stddev": terminal_stddev,
             "first_to_terminal_difference_mean": difference_mean,
+            "first_to_terminal_perceptual_hash_distance": perceptual_distance,
         }
     return metrics
 
@@ -193,19 +352,6 @@ def expected_physical_checkpoint_steps(executed_steps, checkpoint_every_steps):
     )
 
 
-def require_mid_capture(later_step, executed_steps, mid_step):
-    if later_step < 1 or executed_steps < later_step or mid_step < 0:
-        raise RuntimeError("Live-window capture step metadata is invalid")
-    target_step = later_step + 20
-    if executed_steps < target_step:
-        if mid_step != 0:
-            raise RuntimeError("Unexpected mid-run capture before its target step")
-        return False
-    if not target_step <= mid_step <= executed_steps:
-        raise RuntimeError("Required mid-run capture is missing or out of range")
-    return True
-
-
 def collect_artifact_hashes(run_dir):
     hashes = {}
     sizes = {}
@@ -272,9 +418,11 @@ def main():
     if context_mode:
         paths.update(
             {
+                "window_mid": run_dir / "window_mid.png",
                 "window_terminal": run_dir / "window_terminal.png",
                 "desktop_terminal": run_dir / "live_desktop_terminal.png",
                 "terminal_ready": run_dir / "terminal_capture_ready.json",
+                "terminal_receipt": run_dir / "terminal_capture_receipt.json",
                 "terminal_ack": run_dir / "terminal_capture_ack.txt",
                 "input_manifest": run_dir / "input_manifest.json",
                 "input_dataset": run_dir / "input_dataset.json.gz",
@@ -394,6 +542,22 @@ def main():
         )
     ):
         raise RuntimeError("Physical seat0 X11 identity is incomplete")
+    recorded_window_size = [
+        int(visualization.get("window_width", 0)),
+        int(visualization.get("window_height", 0)),
+    ]
+    window_geometry_checks = int(
+        visualization.get("window_geometry_checks", 0)
+    )
+    last_window_geometry_unix = float(
+        visualization.get("last_window_geometry_unix", 0)
+    )
+    if context_mode and (
+        visualization.get("window_locked") != "1"
+        or recorded_window_size[0] < STRICT_LIVE_CANVAS_SIZE[0]
+        or recorded_window_size[1] < STRICT_LIVE_CANVAS_SIZE[1]
+    ):
+        raise RuntimeError("Strict live window was not locked at the large size")
     if result.get("requested_max_episode_steps") != args.expected_steps:
         raise RuntimeError("Requested step count changed during the run")
     executed_steps = int(result.get("executed_steps", 0))
@@ -467,6 +631,11 @@ def main():
         < result["finished_at_unix"] - 5.0
     ):
         raise RuntimeError("The physical seat0 session was not monitored")
+    if context_mode and (
+        window_geometry_checks != window_viewable_checks
+        or last_window_geometry_unix < result["finished_at_unix"] - 5.0
+    ):
+        raise RuntimeError("The locked live-window geometry was not monitored")
     if topology.get("run_id") != args.run_id:
         raise RuntimeError("Topology artifact has a foreign run ID")
     if topology.get("process_id") != process_id:
@@ -621,6 +790,13 @@ def main():
         raise RuntimeError("Visualization event summary differs from the event stream")
     if visualization_manifest.get("topology") != snapshot:
         raise RuntimeError("Visualization topology differs from the final topology")
+    if (
+        visualization_manifest.get("capture_marker_scheme")
+        != "sha256_run_step_v1"
+        or visualization_manifest.get("capture_identity_sha256")
+        != hashlib.sha256(args.run_id.encode("utf-8")).hexdigest()
+    ):
+        raise RuntimeError("Visualization capture-marker identity changed")
     topology_completion_event = completion_events[
         "topology_exploration_completed"
     ][0]
@@ -739,28 +915,11 @@ def main():
             (960, 540),
         ),
     }
-    has_mid_capture = False
     if context_mode:
-        later_step = int(visualization.get("later_step", 0))
-        mid_step = int(visualization.get("mid_step", -1))
-        has_mid_capture = require_mid_capture(
-            later_step,
-            executed_steps,
-            mid_step,
+        image_sizes["window_mid"] = check_image(
+            paths["window_mid"],
+            (640, 480),
         )
-        mid_path = run_dir / "window_mid.png"
-        if has_mid_capture:
-            if not mid_path.is_file():
-                raise FileNotFoundError(
-                    "Missing run evidence: {}".format(mid_path)
-                )
-            paths["window_mid"] = mid_path
-            image_sizes["window_mid"] = check_image(
-                paths["window_mid"],
-                (640, 480),
-            )
-        elif mid_path.exists():
-            raise RuntimeError("Mid-run capture exists without matching step evidence")
         image_sizes["window_terminal"] = check_image(
             paths["window_terminal"],
             (640, 480),
@@ -769,6 +928,20 @@ def main():
             paths["desktop_terminal"],
             (1280, 720),
         )
+        strict_capture_names = [
+            "window_first",
+            "window_later",
+            "window_mid",
+            "window_terminal",
+        ]
+        strict_window_size = image_sizes["window_first"]
+        if strict_window_size != recorded_window_size or any(
+            image_sizes[name] != strict_window_size
+            for name in strict_capture_names
+        ):
+            raise RuntimeError(
+                "Strict physical-window captures changed dimensions"
+            )
     image_hashes = {
         name: sha256(paths[name])
         for name in (
@@ -778,7 +951,7 @@ def main():
             "visualization_final",
             *(
                 (
-                    *(("window_mid",) if has_mid_capture else ()),
+                    "window_mid",
                     "window_terminal",
                     "desktop_terminal",
                 )
@@ -787,36 +960,164 @@ def main():
             ),
         )
     }
-    if image_hashes["window_first"] == image_hashes["window_later"]:
-        raise RuntimeError("The live window pixels did not change across control steps")
+    live_capture_names = [
+        "window_first",
+        "window_later",
+    ]
     if context_mode:
-        live_capture_names = [
-            "window_first",
-            "window_later",
-            *(["window_mid"] if has_mid_capture else []),
-            "window_terminal",
-        ]
-        if len({image_hashes[name] for name in live_capture_names}) != len(
-            live_capture_names
-        ):
-            raise RuntimeError(
-                "The live window did not change across required captures"
-            )
+        live_capture_names.extend(["window_mid", "window_terminal"])
+    live_capture_panel_signatures = {
+        name: dashboard_panel_signature(paths[name])
+        for name in live_capture_names
+    }
+    live_capture_panel_stddev = {
+        name: check_dashboard_nonblank(paths[name])
+        for name in live_capture_names
+    }
     panel_metrics = None
+    rendered_stage_steps = {}
+    rendered_stage_frame_sha256 = {}
+    rendered_stage_frame_panel_phash = {}
+    capture_receipts = {}
     checkpoint_steps = []
     checkpoint_hashes = []
     checkpoint_panel_signatures = []
+    checkpoint_render_frame_hashes = []
+    checkpoint_render_frame_panel_phash = []
     if context_mode:
+        if executed_steps < max(
+            step for _, step in STRICT_VISUAL_CAPTURE_STEPS
+        ):
+            raise RuntimeError(
+                "Strict run ended before all rendered-stage captures"
+            )
+        stage_dir = run_dir / "window_stages"
+        expected_stage_files = set()
+        for stage_name, stage_step in STRICT_VISUAL_CAPTURE_STEPS:
+            ready_path = stage_dir / "ready_{}.json".format(stage_name)
+            ack_path = stage_dir / "ack_{}.txt".format(stage_name)
+            receipt_path = stage_dir / "receipt_{}.json".format(stage_name)
+            if (
+                not ready_path.is_file()
+                or not ack_path.is_file()
+                or not receipt_path.is_file()
+            ):
+                raise RuntimeError("Rendered-stage capture handshake is missing")
+            ready = json.loads(ready_path.read_text())
+            frame_file = "visualization_frames/frame_{:06d}.png".format(
+                stage_step
+            )
+            frame_path = run_dir / frame_file
+            frame_sha256 = sha256(frame_path)
+            if check_image(frame_path, (1600, 900)) != [1600, 900]:
+                raise RuntimeError(
+                    "Rendered-stage frame does not use the fixed canvas"
+                )
+            if ready != {
+                "run_id": args.run_id,
+                "process_id": process_id,
+                "window_id": x11_client_window_id,
+                "stage": stage_name,
+                "step": stage_step,
+                "render_step": stage_step,
+                "frame_file": frame_file,
+                "frame_sha256": frame_sha256,
+            }:
+                raise RuntimeError(
+                    "Rendered-stage capture request identity mismatch"
+                )
+            if ack_path.read_text().strip() != args.run_id:
+                raise RuntimeError(
+                    "Rendered-stage capture acknowledgement mismatch"
+                )
+            if int(visualization.get("{}_step".format(stage_name), -1)) != stage_step:
+                raise RuntimeError(
+                    "Rendered-stage capture report has the wrong step"
+                )
+            progress_event = progress[stage_step - 1]
+            if (
+                progress_event.get("step") != stage_step
+                or progress_event.get("run_id") != args.run_id
+                or progress_event.get("process_id") != process_id
+            ):
+                raise RuntimeError(
+                    "Rendered-stage capture is not bound to progress"
+                )
+            rendered_stage_steps[stage_name] = stage_step
+            rendered_stage_frame_sha256[stage_name] = frame_sha256
+            rendered_stage_frame_panel_phash[stage_name] = (
+                dashboard_panel_signature(frame_path)
+            )
+            window_file = "window_{}.png".format(stage_name)
+            check_capture_marker(
+                run_dir / window_file,
+                args.run_id,
+                stage_step,
+                canvas_size=STRICT_LIVE_CANVAS_SIZE,
+            )
+            check_capture_marker(
+                frame_path,
+                args.run_id,
+                stage_step,
+            )
+            capture_receipts[stage_name] = validate_capture_receipt(
+                receipt_path,
+                expected={
+                    "run_id": args.run_id,
+                    "process_id": process_id,
+                    "window_id": x11_client_window_id,
+                    "capture_label": stage_name,
+                    "step": stage_step,
+                    "render_step": stage_step,
+                    "frame_file": frame_file,
+                    "frame_sha256": frame_sha256,
+                    "window_file": window_file,
+                },
+                run_dir=run_dir,
+                expected_window_size=strict_window_size,
+            )
+            expected_stage_files.update(
+                {
+                    ready_path.name,
+                    ack_path.name,
+                    receipt_path.name,
+                }
+            )
+        actual_stage_files = (
+            {
+                path.name
+                for path in stage_dir.iterdir()
+                if path.is_file()
+            }
+            if stage_dir.is_dir()
+            else set()
+        )
+        if actual_stage_files != expected_stage_files:
+            raise RuntimeError(
+                "Rendered-stage capture file inventory is not exact"
+            )
+        if len(set(rendered_stage_frame_sha256.values())) != len(
+            STRICT_VISUAL_CAPTURE_STEPS
+        ):
+            raise RuntimeError("Rendered-stage frame artifacts contain frozen pixels")
+        require_distinct_panel_signatures(
+            list(rendered_stage_frame_panel_phash.values()),
+            "Rendered-stage frame artifacts",
+        )
         panel_metrics = check_dashboard_panels(
-            paths["window_first"],
-            paths["window_terminal"],
+            run_dir / "visualization_frames" / "frame_000005.png",
+            paths["visualization_final"],
         )
         terminal_ready = json.loads(paths["terminal_ready"].read_text())
+        terminal_frame_sha256 = sha256(paths["visualization_final"])
         if terminal_ready != {
             "run_id": args.run_id,
             "process_id": process_id,
             "window_id": x11_client_window_id,
             "step": executed_steps,
+            "render_step": executed_steps,
+            "frame_file": paths["visualization_final"].name,
+            "frame_sha256": terminal_frame_sha256,
             "completion_reason": completion_reason,
         }:
             raise RuntimeError("Terminal capture request identity mismatch")
@@ -826,6 +1127,33 @@ def main():
             raise RuntimeError("Terminal physical-window capture was not confirmed")
         if int(visualization.get("terminal_step", -1)) != executed_steps:
             raise RuntimeError("Terminal physical-window capture has the wrong step")
+        check_capture_marker(
+            paths["window_terminal"],
+            args.run_id,
+            executed_steps,
+            canvas_size=STRICT_LIVE_CANVAS_SIZE,
+        )
+        check_capture_marker(
+            paths["visualization_final"],
+            args.run_id,
+            executed_steps,
+        )
+        capture_receipts["terminal"] = validate_capture_receipt(
+            paths["terminal_receipt"],
+            expected={
+                "run_id": args.run_id,
+                "process_id": process_id,
+                "window_id": x11_client_window_id,
+                "capture_label": "terminal",
+                "step": executed_steps,
+                "render_step": executed_steps,
+                "frame_file": paths["visualization_final"].name,
+                "frame_sha256": terminal_frame_sha256,
+                "window_file": paths["window_terminal"].name,
+            },
+            run_dir=run_dir,
+            expected_window_size=strict_window_size,
+        )
         checkpoint_every_steps = int(
             visualization.get("checkpoint_every_steps", 0)
         )
@@ -855,7 +1183,11 @@ def main():
         ]
         checkpoint_hashes = []
         for checkpoint_path in checkpoint_paths:
-            check_image(checkpoint_path, (640, 480))
+            checkpoint_size = check_image(checkpoint_path, (640, 480))
+            if checkpoint_size != strict_window_size:
+                raise RuntimeError(
+                    "Physical-window checkpoint changed locked dimensions"
+                )
             checkpoint_hashes.append(sha256(checkpoint_path))
             checkpoint_panel_signatures.append(
                 dashboard_panel_signature(checkpoint_path)
@@ -872,14 +1204,35 @@ def main():
                 / "window_checkpoints"
                 / "ack_{}.txt".format(checkpoint_label)
             )
-            if not ready_path.is_file() or not ack_path.is_file():
+            receipt_path = (
+                run_dir
+                / "window_checkpoints"
+                / "receipt_{}.json".format(checkpoint_label)
+            )
+            if (
+                not ready_path.is_file()
+                or not ack_path.is_file()
+                or not receipt_path.is_file()
+            ):
                 raise RuntimeError("Physical-window checkpoint handshake is missing")
             ready = json.loads(ready_path.read_text())
+            frame_file = "visualization_frames/frame_{}.png".format(
+                checkpoint_label
+            )
+            frame_path = run_dir / frame_file
+            frame_sha256 = sha256(frame_path)
+            if check_image(frame_path, (1600, 900)) != [1600, 900]:
+                raise RuntimeError(
+                    "Checkpoint frame does not use the fixed canvas"
+                )
             if ready != {
                 "run_id": args.run_id,
                 "process_id": process_id,
                 "window_id": x11_client_window_id,
                 "step": step,
+                "render_step": step,
+                "frame_file": frame_file,
+                "frame_sha256": frame_sha256,
             }:
                 raise RuntimeError(
                     "Physical-window checkpoint request identity mismatch"
@@ -888,12 +1241,47 @@ def main():
                 raise RuntimeError(
                     "Physical-window checkpoint acknowledgement mismatch"
                 )
+            checkpoint_render_frame_hashes.append(frame_sha256)
+            checkpoint_render_frame_panel_phash.append(
+                dashboard_panel_signature(frame_path)
+            )
+            window_file = "window_checkpoints/step_{}.png".format(
+                checkpoint_label
+            )
+            check_capture_marker(
+                run_dir / window_file,
+                args.run_id,
+                step,
+                canvas_size=STRICT_LIVE_CANVAS_SIZE,
+            )
+            check_capture_marker(frame_path, args.run_id, step)
+            capture_receipts["checkpoint_{}".format(checkpoint_label)] = (
+                validate_capture_receipt(
+                    receipt_path,
+                    expected={
+                        "run_id": args.run_id,
+                        "process_id": process_id,
+                        "window_id": x11_client_window_id,
+                        "capture_label": "checkpoint_{}".format(
+                            checkpoint_label
+                        ),
+                        "step": step,
+                        "render_step": step,
+                        "frame_file": frame_file,
+                        "frame_sha256": frame_sha256,
+                        "window_file": window_file,
+                    },
+                    run_dir=run_dir,
+                    expected_window_size=strict_window_size,
+                )
+            )
         expected_checkpoint_files = {
             "{}_{:06d}.{}".format(prefix, step, suffix)
             for step in checkpoint_steps
             for prefix, suffix in (
                 ("ready", "json"),
                 ("ack", "txt"),
+                ("receipt", "json"),
                 ("step", "png"),
             )
         }
@@ -912,14 +1300,21 @@ def main():
             )
         if len(set(checkpoint_hashes)) != len(checkpoint_hashes):
             raise RuntimeError("Physical-window checkpoints contain frozen pixels")
-        panel_signature_tuples = [
-            tuple(signature[name] for name in sorted(signature))
-            for signature in checkpoint_panel_signatures
-        ]
-        if len(set(panel_signature_tuples)) != len(panel_signature_tuples):
+        if len(set(checkpoint_render_frame_hashes)) != len(
+            checkpoint_render_frame_hashes
+        ):
             raise RuntimeError(
-                "Physical-window checkpoint panels contain frozen pixels"
+                "Physical-window checkpoint render frames contain frozen pixels"
             )
+        require_distinct_panel_signatures(
+            checkpoint_render_frame_panel_phash,
+            "Physical-window checkpoint render frames",
+        )
+        require_distinct_panel_signatures(
+            list(live_capture_panel_signatures.values())
+            + checkpoint_panel_signatures,
+            "Physical X11 capture sequence",
+        )
     frame_count = int(visualization_manifest.get("frame_count", 0))
     frame_every_steps = int(
         visualization_manifest.get("frame_every_steps", 0)
@@ -930,6 +1325,19 @@ def main():
         raise RuntimeError("Strict visualization frame interval changed")
     if frame_every_steps != metadata.get("visualization_frame_every_steps"):
         raise RuntimeError("Visualization frame interval changed during the run")
+    if visualization_manifest.get("frame_size") != [1600, 900]:
+        raise RuntimeError("Visualization frames do not use the fixed canvas")
+    if visualization_manifest.get("final_image_size") != [1920, 1080]:
+        raise RuntimeError("Final visualization does not use the fixed canvas")
+    if image_sizes["visualization_final"] != [1920, 1080]:
+        raise RuntimeError("Final visualization dimensions are inconsistent")
+    if (
+        visualization_manifest.get("final_image")
+        != paths["visualization_final"].name
+        or visualization_manifest.get("final_image_sha256")
+        != image_hashes["visualization_final"]
+    ):
+        raise RuntimeError("Final visualization identity is inconsistent")
     last_render_step = int(visualization_manifest.get("last_render_step", -1))
     if last_render_step != executed_steps:
         raise RuntimeError("Final dashboard render is not bound to run completion")
@@ -946,6 +1354,13 @@ def main():
         not frame.is_file() for frame in frame_paths
     ):
         raise RuntimeError("Visualization frame manifest is incomplete")
+    for frame_path in frame_paths:
+        if check_image(frame_path, (1600, 900)) != [1600, 900]:
+            raise RuntimeError(
+                "Visualization frame does not use the fixed canvas"
+            )
+        frame_step = int(frame_path.stem.rsplit("_", 1)[1])
+        check_capture_marker(frame_path, args.run_id, frame_step)
     if replay_manifest.get("frame_count") != frame_count:
         raise RuntimeError("Replay frame count mismatch")
     if paths["replay"].stat().st_size < 1024:
@@ -1077,11 +1492,22 @@ def main():
         "early_completion": early_completion,
         "image_sizes": image_sizes,
         "image_sha256": image_hashes,
+        "live_capture_panel_phash": live_capture_panel_signatures,
+        "live_capture_panel_stddev": live_capture_panel_stddev,
         "dashboard_panel_metrics": panel_metrics,
+        "rendered_stage_steps": rendered_stage_steps,
+        "rendered_stage_frame_sha256": rendered_stage_frame_sha256,
+        "rendered_stage_frame_panel_phash": rendered_stage_frame_panel_phash,
         "physical_window_checkpoint_steps": checkpoint_steps,
         "physical_window_checkpoint_sha256": checkpoint_hashes,
         "physical_window_checkpoint_panel_sha256": (
             checkpoint_panel_signatures
+        ),
+        "physical_window_checkpoint_render_frame_sha256": (
+            checkpoint_render_frame_hashes
+        ),
+        "physical_window_checkpoint_render_frame_panel_phash": (
+            checkpoint_render_frame_panel_phash
         ),
         "scene_name": result["scene_name"],
         "topology_status": topology["status"],
@@ -1095,6 +1521,9 @@ def main():
         "topology_event_count": len(topology_events),
         "visualization_frame_count": frame_count,
         "window_viewable_checks": window_viewable_checks,
+        "locked_window_size": recorded_window_size,
+        "window_geometry_checks": window_geometry_checks,
+        "capture_receipts": capture_receipts,
         "physical_session_checks": physical_session_checks,
         "replay": paths["replay"].name,
         "runtime_timing": runtime_timing,

@@ -6,6 +6,15 @@ from collections import Counter, deque
 from pathlib import Path
 
 import numpy as np
+from matplotlib.patches import Rectangle
+
+from run_context_contract import (
+    STRICT_CAPTURE_MARKER_HEIGHT,
+    STRICT_CAPTURE_MARKER_WIDTH,
+    STRICT_CAPTURE_MARKER_X,
+    STRICT_CAPTURE_MARKER_Y,
+    strict_capture_marker_bits,
+)
 
 
 def _json_value(value):
@@ -79,6 +88,9 @@ class TopologyEventRecorder:
 
 
 class RuntimeDashboard:
+    FIXED_RENDER_SIZE_INCHES = (16.0, 9.0)
+    FRAME_DPI = 100
+    FINAL_DPI = 120
     STATUS_COLORS = {
         "exploring": "#16a085",
         "explored": "#7f8c8d",
@@ -89,17 +101,22 @@ class RuntimeDashboard:
         self,
         figure,
         run_dir,
+        capture_identity,
         frame_every_steps=10,
         refresh_seconds=0.01,
     ):
         self.figure = figure
         self.run_dir = Path(run_dir)
+        self.capture_identity = str(capture_identity)
+        if not self.capture_identity:
+            raise ValueError("Runtime dashboard requires a capture identity")
         self.frame_dir = self.run_dir / "visualization_frames"
         self.frame_every_steps = int(frame_every_steps)
         self.refresh_seconds = float(refresh_seconds)
         self.last_saved_step = -1
         self.frame_paths = []
         self.last_render_step = 0
+        self.capture_marker_artists = []
 
         self.figure.clf()
         grid = self.figure.add_gridspec(
@@ -123,6 +140,44 @@ class RuntimeDashboard:
         )
         self.metrics_axis = self.figure.add_subplot(status_grid[0, 0])
         self.events_axis = self.figure.add_subplot(status_grid[1, 0])
+
+    def _draw_capture_marker(self, step):
+        for artist in self.capture_marker_artists:
+            artist.remove()
+        self.capture_marker_artists = []
+        bits = strict_capture_marker_bits(self.capture_identity, step)
+        bit_width = STRICT_CAPTURE_MARKER_WIDTH / len(bits)
+        for index, bit in enumerate(bits):
+            artist = Rectangle(
+                (
+                    STRICT_CAPTURE_MARKER_X + index * bit_width,
+                    STRICT_CAPTURE_MARKER_Y,
+                ),
+                bit_width,
+                STRICT_CAPTURE_MARKER_HEIGHT,
+                transform=self.figure.transFigure,
+                facecolor="#111111" if bit else "#f4f4f4",
+                edgecolor="none",
+                linewidth=0,
+                clip_on=False,
+                zorder=1000,
+            )
+            self.figure.add_artist(artist)
+            self.capture_marker_artists.append(artist)
+
+    def _save_fixed_render(self, path, dpi):
+        original_size = self.figure.get_size_inches().copy()
+        try:
+            self.figure.set_size_inches(
+                *self.FIXED_RENDER_SIZE_INCHES,
+                forward=False,
+            )
+            self.figure.canvas.draw()
+            self.figure.savefig(path, dpi=dpi, facecolor="white")
+        finally:
+            self.figure.set_size_inches(*original_size, forward=False)
+            self.figure.canvas.draw_idle()
+            self.figure.canvas.flush_events()
 
     @staticmethod
     def _map_image(occupied, explored):
@@ -445,6 +500,7 @@ class RuntimeDashboard:
             fontsize=14,
             fontweight="bold",
         )
+        self._draw_capture_marker(step)
         self.figure.canvas.draw_idle()
         self.figure.canvas.flush_events()
 
@@ -456,7 +512,7 @@ class RuntimeDashboard:
         ):
             self.frame_dir.mkdir(parents=True, exist_ok=True)
             frame_path = self.frame_dir / "frame_{:06d}.png".format(int(step))
-            self.figure.savefig(frame_path, dpi=100, facecolor="white")
+            self._save_fixed_render(frame_path, self.FRAME_DPI)
             self.frame_paths.append(frame_path)
             self.last_saved_step = int(step)
         if self.refresh_seconds > 0.0:
@@ -466,7 +522,7 @@ class RuntimeDashboard:
 
     def finalize(self, topology_snapshot, event_summary):
         final_path = self.run_dir / "visualization_final.png"
-        self.figure.savefig(final_path, dpi=120, facecolor="white")
+        self._save_fixed_render(final_path, self.FINAL_DPI)
         manifest = {
             "status": "completed",
             "last_render_step": self.last_render_step,
@@ -475,6 +531,18 @@ class RuntimeDashboard:
             "frames": [path.relative_to(self.run_dir).as_posix() for path in self.frame_paths],
             "final_image": final_path.name,
             "final_image_sha256": _sha256(final_path),
+            "capture_marker_scheme": "sha256_run_step_v1",
+            "capture_identity_sha256": hashlib.sha256(
+                self.capture_identity.encode("utf-8")
+            ).hexdigest(),
+            "frame_size": [
+                int(self.FIXED_RENDER_SIZE_INCHES[0] * self.FRAME_DPI),
+                int(self.FIXED_RENDER_SIZE_INCHES[1] * self.FRAME_DPI),
+            ],
+            "final_image_size": [
+                int(self.FIXED_RENDER_SIZE_INCHES[0] * self.FINAL_DPI),
+                int(self.FIXED_RENDER_SIZE_INCHES[1] * self.FINAL_DPI),
+            ],
             "topology": topology_snapshot,
             "events": event_summary,
         }

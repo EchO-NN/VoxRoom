@@ -3,6 +3,40 @@ import json
 from collections.abc import Mapping
 
 
+STRICT_VISUAL_CAPTURE_STEPS = (
+    ("first", 5),
+    ("later", 10),
+    ("mid", 30),
+)
+STRICT_LIVE_FIGURE_SIZE_INCHES = (32.0, 18.0)
+STRICT_LIVE_FIGURE_DPI = 100
+STRICT_LIVE_CANVAS_SIZE = tuple(
+    int(size * STRICT_LIVE_FIGURE_DPI)
+    for size in STRICT_LIVE_FIGURE_SIZE_INCHES
+)
+STRICT_CAPTURE_MARKER_SYNC = (1, 0, 1, 1, 0, 1, 0, 0)
+STRICT_CAPTURE_MARKER_PAYLOAD_BITS = 64
+STRICT_CAPTURE_MARKER_X = 0.37
+STRICT_CAPTURE_MARKER_Y = 0.012
+STRICT_CAPTURE_MARKER_WIDTH = 0.26
+STRICT_CAPTURE_MARKER_HEIGHT = 0.018
+
+
+def strict_capture_marker_bits(run_id, step):
+    run_id = str(run_id)
+    step = int(step)
+    if not run_id or step < 0:
+        raise ValueError("Capture marker requires a run ID and non-negative step")
+    digest = hashlib.sha256(
+        "{}:{}".format(run_id, step).encode("utf-8")
+    ).digest()
+    payload = tuple(
+        (digest[bit_index // 8] >> (7 - bit_index % 8)) & 1
+        for bit_index in range(STRICT_CAPTURE_MARKER_PAYLOAD_BITS)
+    )
+    return STRICT_CAPTURE_MARKER_SYNC + payload
+
+
 def _field(value, name, default=None):
     if isinstance(value, Mapping):
         return value.get(name, default)

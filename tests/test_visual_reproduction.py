@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from PIL import Image, ImageStat
 
 from topomap_construction import Topomap_construction
 from visualization import RuntimeDashboard, TopologyEventRecorder
+from scripts.validate_run import check_capture_marker
 
 
 class VisualReproductionTests(unittest.TestCase):
@@ -188,6 +190,7 @@ class VisualReproductionTests(unittest.TestCase):
             dashboard = RuntimeDashboard(
                 figure,
                 root,
+                capture_identity="test-run",
                 frame_every_steps=1,
                 refresh_seconds=0,
             )
@@ -239,10 +242,61 @@ class VisualReproductionTests(unittest.TestCase):
             plt.close(figure)
 
             self.assertEqual(manifest["frame_count"], 2)
+            self.assertEqual(manifest["frame_size"], [1600, 900])
+            self.assertEqual(manifest["final_image_size"], [1920, 1080])
             self.assertTrue((root / "visualization_final.png").is_file())
             self.assertTrue((root / "visualization_manifest.json").is_file())
+            for step in (1, 2):
+                frame_path = (
+                    root
+                    / "visualization_frames"
+                    / "frame_{:06d}.png".format(step)
+                )
+                with Image.open(frame_path) as image:
+                    self.assertEqual(image.size, (1600, 900))
+                check_capture_marker(frame_path, "test-run", step)
             with Image.open(root / "visualization_final.png") as image:
+                self.assertEqual(image.size, (1920, 1080))
                 self.assertGreater(max(ImageStat.Stat(image.convert("RGB")).stddev), 2)
+            check_capture_marker(
+                root / "visualization_final.png",
+                "test-run",
+                2,
+            )
+            with self.assertRaises(RuntimeError):
+                check_capture_marker(
+                    root / "visualization_frames" / "frame_000001.png",
+                    "test-run",
+                    2,
+                )
+
+    def test_fixed_render_is_independent_of_live_figure_reflow(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            figure = plt.figure(figsize=(8, 6))
+            dashboard = RuntimeDashboard(
+                figure,
+                root,
+                capture_identity="test-run",
+                frame_every_steps=0,
+                refresh_seconds=0,
+            )
+            figure.suptitle("fixed evidence")
+            dashboard.rgb_axis.imshow(
+                np.arange(64, dtype=np.float32).reshape(8, 8)
+            )
+            first_path = root / "first.png"
+            second_path = root / "second.png"
+            dashboard._save_fixed_render(first_path, dashboard.FRAME_DPI)
+            figure.set_size_inches(12, 6, forward=False)
+            figure.canvas.draw()
+            dashboard._save_fixed_render(second_path, dashboard.FRAME_DPI)
+            plt.close(figure)
+
+            self.assertEqual(
+                hashlib.sha256(first_path.read_bytes()).hexdigest(),
+                hashlib.sha256(second_path.read_bytes()).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

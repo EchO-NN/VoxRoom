@@ -1,6 +1,8 @@
 import gzip
+import hashlib
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +10,13 @@ from types import SimpleNamespace
 from PIL import Image, ImageDraw, ImageOps
 
 from arguments import canonical_task_config
-from run_context_contract import episode_contract_sha256
+from run_context_contract import (
+    STRICT_LIVE_CANVAS_SIZE,
+    STRICT_LIVE_FIGURE_DPI,
+    STRICT_LIVE_FIGURE_SIZE_INCHES,
+    STRICT_VISUAL_CAPTURE_STEPS,
+    episode_contract_sha256,
+)
 from topology_contract import crossing_evidence_survives
 from scripts.prepare_gibson_visual import (
     EXPECTED_GIBSON_ARCHIVE_ENTRY_COUNT,
@@ -30,8 +38,8 @@ from scripts.validate_run import (
     detect_run_context,
     expected_physical_checkpoint_steps,
     expected_visualization_frames,
-    require_mid_capture,
     require_fail_fast_sources,
+    validate_capture_receipt,
 )
 
 
@@ -163,16 +171,14 @@ class GibsonVisualPreparationTests(unittest.TestCase):
             [100, 200],
         )
 
-    def test_mid_capture_is_optional_only_when_episode_ends_before_target(self):
-        self.assertFalse(require_mid_capture(15, 34, 0))
-        self.assertTrue(require_mid_capture(15, 35, 35))
-        self.assertTrue(require_mid_capture(15, 40, 39))
-        with self.assertRaises(RuntimeError):
-            require_mid_capture(15, 35, 0)
-        with self.assertRaises(RuntimeError):
-            require_mid_capture(15, 34, 34)
-        with self.assertRaises(RuntimeError):
-            require_mid_capture(15, 40, 41)
+    def test_strict_visual_stages_are_fixed_render_milestones(self):
+        self.assertEqual(
+            STRICT_VISUAL_CAPTURE_STEPS,
+            (("first", 5), ("later", 10), ("mid", 30)),
+        )
+        self.assertEqual(STRICT_LIVE_FIGURE_SIZE_INCHES, (32.0, 18.0))
+        self.assertEqual(STRICT_LIVE_FIGURE_DPI, 100)
+        self.assertEqual(STRICT_LIVE_CANVAS_SIZE, (3200, 1800))
 
     def test_artifact_hash_closure_excludes_only_its_own_report(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -189,6 +195,54 @@ class GibsonVisualPreparationTests(unittest.TestCase):
                 {"result.json", "frames/frame.png"},
             )
             self.assertEqual(sizes["result.json"], 6)
+
+    def test_capture_receipt_binds_window_and_rendered_frame_pixels(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            frame_path = root / "frame.png"
+            window_path = root / "window.png"
+            receipt_path = root / "receipt.json"
+            frame_path.write_bytes(b"rendered-frame")
+            window_path.write_bytes(b"physical-window")
+            expected = {
+                "run_id": "run",
+                "process_id": 123,
+                "window_id": "0x123",
+                "capture_label": "first",
+                "step": 5,
+                "render_step": 5,
+                "frame_file": frame_path.name,
+                "frame_sha256": hashlib.sha256(
+                    frame_path.read_bytes()
+                ).hexdigest(),
+                "window_file": window_path.name,
+            }
+            receipt = {
+                **expected,
+                "window_sha256": hashlib.sha256(
+                    window_path.read_bytes()
+                ).hexdigest(),
+                "window_size": [3200, 1842],
+                "captured_at_unix": time.time(),
+            }
+            receipt_path.write_text(json.dumps(receipt))
+
+            validated = validate_capture_receipt(
+                receipt_path,
+                expected=expected,
+                run_dir=root,
+                expected_window_size=[3200, 1842],
+            )
+
+            self.assertEqual(validated["step"], 5)
+            window_path.write_bytes(b"changed-window")
+            with self.assertRaises(RuntimeError):
+                validate_capture_receipt(
+                    receipt_path,
+                    expected=expected,
+                    run_dir=root,
+                    expected_window_size=[3200, 1842],
+                )
 
     def test_episode_contract_matches_loaded_object_and_detects_mutation(self):
         source = {
@@ -268,7 +322,13 @@ class GibsonVisualPreparationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 check_dashboard_panels(first_path, terminal_path)
 
-            ImageOps.invert(first).save(terminal_path)
+            first.resize((1200, 900), Image.Resampling.BICUBIC).save(
+                terminal_path
+            )
+            with self.assertRaises(RuntimeError):
+                check_dashboard_panels(first_path, terminal_path)
+
+            ImageOps.invert(first).resize((1200, 900)).save(terminal_path)
             metrics = check_dashboard_panels(first_path, terminal_path)
             self.assertEqual(set(metrics), {"rgb", "map", "topology", "status"})
 

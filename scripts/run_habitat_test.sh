@@ -81,6 +81,26 @@ if [[ "$RUN_CONTEXT_REQUIRED" == "1" \
     echo "Required run context files are missing" >&2
     exit 1
 fi
+strict_stage_names=()
+strict_stage_steps=()
+strict_live_canvas_width=0
+strict_live_canvas_height=0
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
+    read -r strict_first_step strict_later_step strict_mid_step < <(
+        PYTHONPATH="$ROOT_DIR" "$PYTHON" -c \
+            'from run_context_contract import STRICT_VISUAL_CAPTURE_STEPS as s; print(*(step for _, step in s))'
+    )
+    read -r strict_live_canvas_width strict_live_canvas_height < <(
+        PYTHONPATH="$ROOT_DIR" "$PYTHON" -c \
+            'from run_context_contract import STRICT_LIVE_CANVAS_SIZE as s; print(*s)'
+    )
+    strict_stage_names=(first later mid)
+    strict_stage_steps=(
+        "$strict_first_step"
+        "$strict_later_step"
+        "$strict_mid_step"
+    )
+fi
 
 uid="$(id -u)"
 session_listing="$(
@@ -278,7 +298,10 @@ verify_physical_session() {
 
 verify_live_window() {
     local candidate_id="$1"
+    local candidate_height
     local candidate_pid
+    local candidate_width
+    local window_info
     verify_physical_session || return 1
     candidate_pid="$(
         DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
@@ -291,15 +314,47 @@ verify_live_window() {
         timeout --signal=TERM --kill-after=2s 5s \
         xprop -id "$candidate_id" WM_NAME 2>/dev/null |
         grep -Fq "\"$WINDOW_TITLE\"" || return 1
-    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+    window_info="$(
+        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
         timeout --signal=TERM --kill-after=2s 5s \
-        xwininfo -id "$candidate_id" 2>/dev/null |
-        grep -Fq "Map State: IsViewable" || return 1
+            xwininfo -id "$candidate_id" 2>/dev/null
+    )" || return 1
+    grep -Fq "Map State: IsViewable" <<<"$window_info" || return 1
+    candidate_width="$(
+        awk '$1 == "Width:" {print $2; exit}' <<<"$window_info"
+    )"
+    candidate_height="$(
+        awk '$1 == "Height:" {print $2; exit}' <<<"$window_info"
+    )"
+    [[ "$candidate_width" =~ ^[1-9][0-9]*$ \
+        && "$candidate_height" =~ ^[1-9][0-9]*$ ]] || return 1
+    if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
+        if ((candidate_width < strict_live_canvas_width \
+            || candidate_height < strict_live_canvas_height)); then
+            return 1
+        fi
+        if ((window_width == 0)); then
+            window_width="$candidate_width"
+            window_height="$candidate_height"
+        elif ((candidate_width != window_width \
+            || candidate_height != window_height)); then
+            return 1
+        fi
+    elif ((window_width == 0)); then
+        window_width="$candidate_width"
+        window_height="$candidate_height"
+    fi
     window_viewable_checks=$((window_viewable_checks + 1))
     last_window_viewable_unix="$(date +%s.%N)"
+    window_geometry_checks=$((window_geometry_checks + 1))
+    last_window_geometry_unix="$last_window_viewable_unix"
 }
 
 window_id=""
+window_width=0
+window_height=0
+window_geometry_checks=0
+last_window_geometry_unix=0
 physical_session_checks=0
 last_physical_session_check_unix=0
 window_viewable_checks=0
@@ -307,6 +362,10 @@ last_window_viewable_unix=0
 checkpoint_steps=""
 checkpoint_count=0
 next_checkpoint="$WINDOW_CHECKPOINT_EVERY_STEPS"
+stage_capture_index=0
+first_step=0
+later_step=0
+mid_step=0
 terminal_captured=0
 terminal_step=0
 
@@ -316,6 +375,9 @@ capture_ready_checkpoint() {
     local current_progress
     local ready_run_id
     local ready_process_id
+    local ready_frame_file
+    local ready_frame_sha256
+    local ready_render_step
     local ready_window_id
     local ready_step
     [[ -s "$RUN_DIR/progress.jsonl" ]] || return 0
@@ -323,16 +385,21 @@ capture_ready_checkpoint() {
     checkpoint_ready="$RUN_DIR/window_checkpoints/ready_$checkpoint_label.json"
     [[ -s "$checkpoint_ready" ]] || return 0
     current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    read -r ready_run_id ready_process_id ready_window_id ready_step < <(
+    read -r ready_run_id ready_process_id ready_window_id ready_step \
+        ready_render_step ready_frame_file ready_frame_sha256 < <(
         timeout --signal=TERM --kill-after=2s 10s \
             "$PYTHON" -c \
-            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"])' \
+            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"], d["render_step"], d["frame_file"], d["frame_sha256"])' \
             "$checkpoint_ready"
     )
     if [[ "$ready_run_id" != "$RUN_ID" \
         || "$ready_process_id" != "$run_pid" \
         || "$ready_window_id" != "$window_id" \
         || "$ready_step" != "$next_checkpoint" \
+        || "$ready_render_step" != "$next_checkpoint" \
+        || "$ready_frame_file" \
+            != "visualization_frames/frame_$checkpoint_label.png" \
+        || ! "$ready_frame_sha256" =~ ^[0-9a-f]{64}$ \
         || "$current_progress" != "$next_checkpoint" ]]; then
         echo "Periodic capture handshake identity mismatch" >&2
         return 1
@@ -343,7 +410,18 @@ capture_ready_checkpoint() {
         "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
         --window-id "$window_id" \
         --window-output \
-        "$RUN_DIR/window_checkpoints/step_$checkpoint_label.png"
+        "$RUN_DIR/window_checkpoints/step_$checkpoint_label.png" \
+        --receipt-output \
+        "$RUN_DIR/window_checkpoints/receipt_$checkpoint_label.json" \
+        --run-id "$RUN_ID" \
+        --process-id "$run_pid" \
+        --capture-label "checkpoint_$checkpoint_label" \
+        --step "$next_checkpoint" \
+        --render-step "$ready_render_step" \
+        --frame-path "$RUN_DIR/$ready_frame_file" \
+        --frame-file "$ready_frame_file" \
+        --frame-sha256 "$ready_frame_sha256" \
+        --window-file "window_checkpoints/step_$checkpoint_label.png"
     printf '%s\n' "$RUN_ID" \
         >"$RUN_DIR/window_checkpoints/.ack_$checkpoint_label.tmp"
     mv "$RUN_DIR/window_checkpoints/.ack_$checkpoint_label.tmp" \
@@ -356,10 +434,93 @@ capture_ready_checkpoint() {
     next_checkpoint=$((next_checkpoint + WINDOW_CHECKPOINT_EVERY_STEPS))
 }
 
+capture_ready_stage() {
+    local ack_path
+    local capture_args
+    local current_progress
+    local expected_stage
+    local expected_step
+    local ready_path
+    local ready_process_id
+    local ready_frame_file
+    local ready_frame_sha256
+    local ready_render_step
+    local ready_run_id
+    local ready_stage
+    local ready_step
+    local ready_window_id
+    [[ "$RUN_CONTEXT_REQUIRED" == "1" ]] || return 0
+    ((${#strict_stage_names[@]} == ${#strict_stage_steps[@]})) || return 1
+    ((stage_capture_index < ${#strict_stage_names[@]})) || return 0
+    expected_stage="${strict_stage_names[$stage_capture_index]}"
+    expected_step="${strict_stage_steps[$stage_capture_index]}"
+    ready_path="$RUN_DIR/window_stages/ready_$expected_stage.json"
+    ack_path="$RUN_DIR/window_stages/ack_$expected_stage.txt"
+    current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
+    if [[ ! -s "$ready_path" ]]; then
+        if ((current_progress > expected_step)); then
+            echo "Application advanced past a required rendered-stage capture" >&2
+            return 1
+        fi
+        return 0
+    fi
+    read -r ready_run_id ready_process_id ready_window_id ready_stage \
+        ready_step ready_render_step ready_frame_file \
+        ready_frame_sha256 < <(
+        timeout --signal=TERM --kill-after=2s 10s \
+            "$PYTHON" -c \
+            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["stage"], d["step"], d["render_step"], d["frame_file"], d["frame_sha256"])' \
+            "$ready_path"
+    )
+    if [[ "$ready_run_id" != "$RUN_ID" \
+        || "$ready_process_id" != "$run_pid" \
+        || "$ready_window_id" != "$window_id" \
+        || "$ready_stage" != "$expected_stage" \
+        || "$ready_step" != "$expected_step" \
+        || "$ready_render_step" != "$expected_step" \
+        || "$ready_frame_file" \
+            != "visualization_frames/frame_$(printf '%06d' "$expected_step").png" \
+        || ! "$ready_frame_sha256" =~ ^[0-9a-f]{64}$ \
+        || "$current_progress" != "$expected_step" ]]; then
+        echo "Rendered-stage capture handshake identity mismatch" >&2
+        return 1
+    fi
+    verify_live_window "$window_id"
+    capture_args=(
+        "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py"
+        --window-id "$window_id"
+        --window-output "$RUN_DIR/window_$expected_stage.png"
+        --receipt-output \
+        "$RUN_DIR/window_stages/receipt_$expected_stage.json"
+        --run-id "$RUN_ID"
+        --process-id "$run_pid"
+        --capture-label "$expected_stage"
+        --step "$expected_step"
+        --render-step "$ready_render_step"
+        --frame-path "$RUN_DIR/$ready_frame_file"
+        --frame-file "$ready_frame_file"
+        --frame-sha256 "$ready_frame_sha256"
+        --window-file "window_$expected_stage.png"
+    )
+    if [[ "$expected_stage" == "first" ]]; then
+        capture_args+=(--desktop-output "$RUN_DIR/live_desktop.png")
+    fi
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=5s 30s "${capture_args[@]}"
+    printf '%s\n' "$RUN_ID" >"$RUN_DIR/window_stages/.ack_$expected_stage.tmp"
+    mv "$RUN_DIR/window_stages/.ack_$expected_stage.tmp" "$ack_path"
+    printf -v "${expected_stage}_step" '%s' "$expected_step"
+    stage_capture_index=$((stage_capture_index + 1))
+}
+
 capture_terminal_if_ready() {
     local current_progress
+    local ready_completion_reason
+    local ready_frame_file
+    local ready_frame_sha256
     local ready_run_id
     local ready_process_id
+    local ready_render_step
     local ready_window_id
     local ready_step
     [[ "$terminal_captured" == "0" ]] || return 0
@@ -369,16 +530,23 @@ capture_terminal_if_ready() {
         return 1
     fi
     current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    read -r ready_run_id ready_process_id ready_window_id ready_step < <(
+    read -r ready_run_id ready_process_id ready_window_id ready_step \
+        ready_render_step ready_frame_file ready_frame_sha256 \
+        ready_completion_reason < <(
         timeout --signal=TERM --kill-after=2s 10s \
             "$PYTHON" -c \
-            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"])' \
+            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"], d["render_step"], d["frame_file"], d["frame_sha256"], d["completion_reason"])' \
             "$RUN_DIR/terminal_capture_ready.json"
     )
     if [[ "$ready_run_id" != "$RUN_ID" \
         || "$ready_process_id" != "$run_pid" \
         || "$ready_window_id" != "$window_id" \
-        || "$ready_step" != "$current_progress" ]]; then
+        || "$ready_step" != "$current_progress" \
+        || "$ready_render_step" != "$current_progress" \
+        || "$ready_frame_file" != "visualization_final.png" \
+        || ! "$ready_frame_sha256" =~ ^[0-9a-f]{64}$ \
+        || "$ready_completion_reason" \
+            != "topology_exploration_completed" ]]; then
         echo "Terminal capture handshake identity mismatch" >&2
         return 1
     fi
@@ -388,7 +556,17 @@ capture_terminal_if_ready() {
         "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
         --window-id "$window_id" \
         --window-output "$RUN_DIR/window_terminal.png" \
-        --desktop-output "$RUN_DIR/live_desktop_terminal.png"
+        --desktop-output "$RUN_DIR/live_desktop_terminal.png" \
+        --receipt-output "$RUN_DIR/terminal_capture_receipt.json" \
+        --run-id "$RUN_ID" \
+        --process-id "$run_pid" \
+        --capture-label terminal \
+        --step "$current_progress" \
+        --render-step "$ready_render_step" \
+        --frame-path "$RUN_DIR/$ready_frame_file" \
+        --frame-file "$ready_frame_file" \
+        --frame-sha256 "$ready_frame_sha256" \
+        --window-file "window_terminal.png"
     printf '%s\n' "$RUN_ID" >"$RUN_DIR/.terminal_capture_ack.tmp"
     mv "$RUN_DIR/.terminal_capture_ack.tmp" \
         "$RUN_DIR/terminal_capture_ack.txt"
@@ -425,138 +603,175 @@ if [[ ! -s "$RUN_DIR/progress.jsonl" ]]; then
     exit 1
 fi
 
-first_refresh_target=$(($(wc -l <"$RUN_DIR/progress.jsonl") + 1))
-first_refresh_deadline=$((SECONDS + STALL_TIMEOUT_SECONDS))
-while ((SECONDS < first_refresh_deadline)); do
-    if ! kill -0 "$run_pid" 2>/dev/null; then
-        break
-    fi
-    if ! verify_live_window "$window_id"; then
-        if ! kill -0 "$run_pid" 2>/dev/null; then
-            break
-        fi
-        echo "The process-owned live visualization window became unavailable" >&2
-        exit 1
-    fi
-    capture_ready_checkpoint
-    first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    if ((first_step >= first_refresh_target)); then
-        break
-    fi
-    capture_terminal_if_ready
-    if [[ "$terminal_captured" == "1" ]]; then
-        break
-    fi
-    sleep 1
-done
-first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
-if ((first_step < first_refresh_target)); then
-    if [[ "$terminal_captured" == "1" ]]; then
-        echo "The episode completed before the first visual refresh" >&2
-        exit 1
-    fi
-    echo "The live window did not complete its first visual refresh" >&2
-    exit 1
-fi
-
-verify_live_window "$window_id"
-DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-    timeout --signal=TERM --kill-after=5s 30s \
-    "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
-    --window-id "$window_id" \
-    --window-output "$RUN_DIR/window_first.png" \
-    --desktop-output "$RUN_DIR/live_desktop.png"
-
-later_target=$((first_step + 3))
-later_deadline=$((SECONDS + STALL_TIMEOUT_SECONDS))
-while ((SECONDS < later_deadline)); do
-    if ! kill -0 "$run_pid" 2>/dev/null; then
-        break
-    fi
-    if ! verify_live_window "$window_id"; then
-        if ! kill -0 "$run_pid" 2>/dev/null; then
-            break
-        fi
-        echo "The process-owned live visualization window became unavailable" >&2
-        exit 1
-    fi
-    capture_ready_checkpoint
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
     current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    if ((current_step >= later_target)); then
-        break
-    fi
-    capture_terminal_if_ready
-    if [[ "$terminal_captured" == "1" ]]; then
-        break
-    fi
-    sleep 1
-done
-current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
-if ((current_step < later_target)); then
-    if [[ "$terminal_captured" == "1" ]]; then
-        echo "The episode completed before three visual control steps elapsed" >&2
+    last_progress="$current_step"
+    last_progress_at="$SECONDS"
+    run_deadline=$((SECONDS + RUN_TIMEOUT_SECONDS))
+    while kill -0 "$run_pid" 2>/dev/null; do
+        if ! verify_live_window "$window_id"; then
+            if ! kill -0 "$run_pid" 2>/dev/null; then
+                break
+            fi
+            echo "The process-owned live visualization window became unavailable" >&2
+            exit 1
+        fi
+        capture_ready_stage
+        capture_ready_checkpoint
+        current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
+        if ((current_progress > last_progress)); then
+            last_progress="$current_progress"
+            last_progress_at="$SECONDS"
+        fi
+        capture_terminal_if_ready
+        if ((SECONDS - last_progress_at > STALL_TIMEOUT_SECONDS)); then
+            echo "Control progress stalled at step $last_progress" >&2
+            exit 1
+        fi
+        if ((SECONDS > run_deadline)); then
+            echo "Run timed out at step $last_progress" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+else
+    first_refresh_target=$(($(wc -l <"$RUN_DIR/progress.jsonl") + 1))
+    first_refresh_deadline=$((SECONDS + STALL_TIMEOUT_SECONDS))
+    while ((SECONDS < first_refresh_deadline)); do
+        if ! kill -0 "$run_pid" 2>/dev/null; then
+            break
+        fi
+        if ! verify_live_window "$window_id"; then
+            if ! kill -0 "$run_pid" 2>/dev/null; then
+                break
+            fi
+            echo "The process-owned live visualization window became unavailable" >&2
+            exit 1
+        fi
+        capture_ready_checkpoint
+        first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
+        if ((first_step >= first_refresh_target)); then
+            break
+        fi
+        capture_terminal_if_ready
+        if [[ "$terminal_captured" == "1" ]]; then
+            break
+        fi
+        sleep 1
+    done
+    first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
+    if ((first_step < first_refresh_target)); then
+        if [[ "$terminal_captured" == "1" ]]; then
+            echo "The episode completed before the first visual refresh" >&2
+            exit 1
+        fi
+        echo "The live window did not complete its first visual refresh" >&2
         exit 1
     fi
-    echo "The visualization did not advance by three control steps" >&2
-    exit 1
-fi
 
-verify_live_window "$window_id"
-DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-    timeout --signal=TERM --kill-after=5s 30s \
-    "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
-    --window-id "$window_id" \
-    --window-output "$RUN_DIR/window_later.png"
-printf 'run_id=%s\nprocess_id=%s\ndisplay=%s\nsession_id=%s\nwindow_id=%s\nwindow_title=%s\nfirst_step=%s\nlater_step=%s\nconfirmed=1\n' \
+    verify_live_window "$window_id"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=5s 30s \
+        "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+        --window-id "$window_id" \
+        --window-output "$RUN_DIR/window_first.png" \
+        --desktop-output "$RUN_DIR/live_desktop.png"
+
+    later_target=$((first_step + 3))
+    later_deadline=$((SECONDS + STALL_TIMEOUT_SECONDS))
+    while ((SECONDS < later_deadline)); do
+        if ! kill -0 "$run_pid" 2>/dev/null; then
+            break
+        fi
+        if ! verify_live_window "$window_id"; then
+            if ! kill -0 "$run_pid" 2>/dev/null; then
+                break
+            fi
+            echo "The process-owned live visualization window became unavailable" >&2
+            exit 1
+        fi
+        capture_ready_checkpoint
+        current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
+        if ((current_step >= later_target)); then
+            break
+        fi
+        capture_terminal_if_ready
+        if [[ "$terminal_captured" == "1" ]]; then
+            break
+        fi
+        sleep 1
+    done
+    current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
+    if ((current_step < later_target)); then
+        if [[ "$terminal_captured" == "1" ]]; then
+            echo "The episode completed before three visual control steps elapsed" >&2
+            exit 1
+        fi
+        echo "The visualization did not advance by three control steps" >&2
+        exit 1
+    fi
+
+    verify_live_window "$window_id"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=5s 30s \
+        "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+        --window-id "$window_id" \
+        --window-output "$RUN_DIR/window_later.png"
+    later_step="$current_step"
+
+    last_progress="$current_step"
+    last_progress_at="$SECONDS"
+    mid_target=$((current_step + 20))
+    run_deadline=$((SECONDS + RUN_TIMEOUT_SECONDS))
+    while kill -0 "$run_pid" 2>/dev/null; do
+        sleep 2
+        if ! kill -0 "$run_pid" 2>/dev/null; then
+            break
+        fi
+        if ! verify_live_window "$window_id"; then
+            if ! kill -0 "$run_pid" 2>/dev/null; then
+                break
+            fi
+            echo "The process-owned live visualization window became unavailable" >&2
+            exit 1
+        fi
+        capture_ready_checkpoint
+        current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
+        if ((current_progress > last_progress)); then
+            last_progress="$current_progress"
+            last_progress_at="$SECONDS"
+        fi
+        if ((mid_step == 0 && current_progress >= mid_target)); then
+            DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+                timeout --signal=TERM --kill-after=5s 30s \
+                "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+                --window-id "$window_id" \
+                --window-output "$RUN_DIR/window_mid.png"
+            mid_step="$current_progress"
+        fi
+        capture_terminal_if_ready
+        if ((SECONDS - last_progress_at > STALL_TIMEOUT_SECONDS)); then
+            echo "Control progress stalled at step $last_progress" >&2
+            exit 1
+        fi
+        if ((SECONDS > run_deadline)); then
+            echo "Run timed out at step $last_progress" >&2
+            exit 1
+        fi
+    done
+fi
+printf 'run_id=%s\nprocess_id=%s\ndisplay=%s\nsession_id=%s\nwindow_id=%s\nwindow_title=%s\nfirst_step=%s\nlater_step=%s\nmid_step=%s\nconfirmed=1\n' \
     "$RUN_ID" "$run_pid" "$DISPLAY" "$session_id" "$window_id" "$WINDOW_TITLE" \
-    "$first_step" "$current_step" >"$RUN_DIR/live_visualization.txt"
+    "$first_step" "$later_step" "$mid_step" >"$RUN_DIR/live_visualization.txt"
 printf 'session_vtnr=%s\nxserver_pid=%s\nxauthority=%s\nx11_socket=%s\nphysical_session_confirmed=1\n' \
     "$session_vtnr" "$xserver_pid" "$XAUTHORITY" "$x11_socket" \
     >>"$RUN_DIR/live_visualization.txt"
-
-last_progress="$current_step"
-last_progress_at="$SECONDS"
-mid_target=$((current_step + 20))
-mid_step=0
-run_deadline=$((SECONDS + RUN_TIMEOUT_SECONDS))
-while kill -0 "$run_pid" 2>/dev/null; do
-    sleep 2
-    if ! kill -0 "$run_pid" 2>/dev/null; then
-        break
-    fi
-    if ! verify_live_window "$window_id"; then
-        if ! kill -0 "$run_pid" 2>/dev/null; then
-            break
-        fi
-        echo "The process-owned live visualization window became unavailable" >&2
-        exit 1
-    fi
-    capture_ready_checkpoint
-    current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    if ((current_progress > last_progress)); then
-        last_progress="$current_progress"
-        last_progress_at="$SECONDS"
-    fi
-    if ((mid_step == 0 && current_progress >= mid_target)); then
-        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-            timeout --signal=TERM --kill-after=5s 30s \
-            "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
-            --window-id "$window_id" \
-            --window-output "$RUN_DIR/window_mid.png"
-        mid_step="$current_progress"
-    fi
-    capture_terminal_if_ready
-    if ((SECONDS - last_progress_at > STALL_TIMEOUT_SECONDS)); then
-        echo "Control progress stalled at step $last_progress" >&2
-        exit 1
-    fi
-    if ((SECONDS > run_deadline)); then
-        echo "Run timed out at step $last_progress" >&2
-        exit 1
-    fi
-done
-printf 'mid_step=%s\nwindow_viewable_checks=%s\nlast_window_viewable_unix=%s\n' \
-    "$mid_step" "$window_viewable_checks" "$last_window_viewable_unix" \
+printf 'window_viewable_checks=%s\nlast_window_viewable_unix=%s\n' \
+    "$window_viewable_checks" "$last_window_viewable_unix" \
+    >>"$RUN_DIR/live_visualization.txt"
+printf 'window_width=%s\nwindow_height=%s\nwindow_locked=%s\nwindow_geometry_checks=%s\nlast_window_geometry_unix=%s\n' \
+    "$window_width" "$window_height" "$RUN_CONTEXT_REQUIRED" \
+    "$window_geometry_checks" "$last_window_geometry_unix" \
     >>"$RUN_DIR/live_visualization.txt"
 printf 'physical_session_checks=%s\nlast_physical_session_check_unix=%s\n' \
     "$physical_session_checks" "$last_physical_session_check_unix" \
@@ -585,6 +800,11 @@ if [[ "$run_status" -ne 0 ]]; then
 fi
 if [[ "$RUN_CONTEXT_REQUIRED" == "1" && "$terminal_captured" != "1" ]]; then
     echo "Strict run exited without a terminal physical-window capture" >&2
+    exit 1
+fi
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" \
+    && "$stage_capture_index" -ne "${#strict_stage_names[@]}" ]]; then
+    echo "Strict run exited without all rendered-stage captures" >&2
     exit 1
 fi
 

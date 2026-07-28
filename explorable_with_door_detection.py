@@ -37,7 +37,12 @@ from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
 from time import perf_counter, time
 from visualization import RuntimeDashboard, TopologyEventRecorder
-from run_context_contract import episode_contract_sha256
+from run_context_contract import (
+    STRICT_LIVE_FIGURE_DPI,
+    STRICT_LIVE_FIGURE_SIZE_INCHES,
+    STRICT_VISUAL_CAPTURE_STEPS,
+    episode_contract_sha256,
+)
 from topology_contract import surviving_crossing_count
 
 def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
@@ -89,7 +94,20 @@ def bind_x11_client_window(figure, window_title):
     figure.canvas.draw()
     manager.show()
     window.update_idletasks()
+    locked_width = int(window.winfo_width())
+    locked_height = int(window.winfo_height())
+    if locked_width <= 1 or locked_height <= 1:
+        raise RuntimeError("Tk did not realize the live dashboard dimensions")
+    window.geometry("{}x{}".format(locked_width, locked_height))
+    window.minsize(locked_width, locked_height)
+    window.maxsize(locked_width, locked_height)
+    window.resizable(False, False)
     window.update()
+    if (
+        int(window.winfo_width()) != locked_width
+        or int(window.winfo_height()) != locked_height
+    ):
+        raise RuntimeError("Tk did not preserve the locked dashboard dimensions")
     inner_window_id = int(window.winfo_id())
     if inner_window_id <= 0:
         raise RuntimeError("Tk did not expose a valid X11 client window ID")
@@ -581,10 +599,23 @@ def main():
     dashboard = None
     x11_client_window_id = None
     if args.visualize or args.print_images:
-        live_figure = plt.figure(num=args.window_title, figsize=(16, 9))
+        live_figure = plt.figure(
+            num=args.window_title,
+            figsize=(
+                STRICT_LIVE_FIGURE_SIZE_INCHES
+                if run_context is not None
+                else (16.0, 9.0)
+            ),
+            dpi=(
+                STRICT_LIVE_FIGURE_DPI
+                if run_context is not None
+                else 100
+            ),
+        )
         dashboard = RuntimeDashboard(
             live_figure,
             run_dir,
+            capture_identity=args.run_id,
             frame_every_steps=args.visualization_frame_every_steps,
             refresh_seconds=args.visualization_refresh_seconds,
         )
@@ -689,6 +720,21 @@ def main():
         panoramic_obstacle_map = torch.zeros(num_scenes, 4, full_w, full_h).float().to(device)
         trajectory_xy = deque(maxlen=args.max_episode_length + 1)
 
+        def require_x11_capture(ready_path, ack_path, payload, timeout_message):
+            if ready_path.is_file():
+                if json.loads(ready_path.read_text(encoding="utf-8")) != payload:
+                    raise RuntimeError("X11 capture request identity changed")
+            else:
+                write_json_atomic(ready_path, payload)
+            capture_deadline = time() + 120.0
+            while not ack_path.is_file():
+                if time() >= capture_deadline:
+                    raise TimeoutError(timeout_message)
+                live_figure.canvas.flush_events()
+                plt.pause(0.05)
+            if ack_path.read_text(encoding="utf-8").strip() != args.run_id:
+                raise RuntimeError("X11 capture acknowledgement mismatch")
+
         def render_dashboard(info, absolute_locs, goal_xy=None, frontiers=None):
             if dashboard is None:
                 return
@@ -734,6 +780,45 @@ def main():
                 },
                 events=event_recorder.latest_events(),
             )
+            if run_context is not None:
+                for stage_name, stage_step in STRICT_VISUAL_CAPTURE_STEPS:
+                    if action_count != stage_step:
+                        continue
+                    if dashboard.last_render_step != stage_step:
+                        raise RuntimeError(
+                            "Strict visual stage is not bound to its rendered step"
+                        )
+                    frame_path = dashboard.frame_dir / (
+                        "frame_{:06d}.png".format(stage_step)
+                    )
+                    if (
+                        dashboard.last_saved_step != stage_step
+                        or not frame_path.is_file()
+                    ):
+                        raise RuntimeError(
+                            "Strict visual stage has no rendered frame artifact"
+                        )
+                    stage_dir = run_dir / "window_stages"
+                    stage_dir.mkdir(parents=True, exist_ok=True)
+                    require_x11_capture(
+                        stage_dir / "ready_{}.json".format(stage_name),
+                        stage_dir / "ack_{}.txt".format(stage_name),
+                        {
+                            "run_id": args.run_id,
+                            "process_id": os.getpid(),
+                            "window_id": x11_client_window_id,
+                            "stage": stage_name,
+                            "step": stage_step,
+                            "render_step": dashboard.last_render_step,
+                            "frame_file": frame_path.relative_to(
+                                run_dir
+                            ).as_posix(),
+                            "frame_sha256": sha256(frame_path),
+                        },
+                        "Timed out waiting for the {} X11 stage capture".format(
+                            stage_name
+                        ),
+                    )
             if (
                 run_context is not None
                 and action_count > 0
@@ -748,28 +833,33 @@ def main():
                 ack_path = checkpoint_dir / (
                     "ack_{}.txt".format(checkpoint_label)
                 )
-                if not ack_path.is_file():
-                    write_json_atomic(
-                        ready_path,
-                        {
-                            "run_id": args.run_id,
-                            "process_id": os.getpid(),
-                            "window_id": x11_client_window_id,
-                            "step": action_count,
-                        },
-                    )
-                    checkpoint_deadline = time() + 120.0
-                    while not ack_path.is_file():
-                        if time() >= checkpoint_deadline:
-                            raise TimeoutError(
-                                "Timed out waiting for X11 checkpoint capture"
-                            )
-                        live_figure.canvas.flush_events()
-                        plt.pause(0.05)
-                if ack_path.read_text(encoding="utf-8").strip() != args.run_id:
+                frame_path = dashboard.frame_dir / (
+                    "frame_{}.png".format(checkpoint_label)
+                )
+                if (
+                    dashboard.last_render_step != action_count
+                    or dashboard.last_saved_step != action_count
+                    or not frame_path.is_file()
+                ):
                     raise RuntimeError(
-                        "X11 checkpoint capture acknowledgement mismatch"
+                        "Periodic X11 checkpoint has no rendered frame artifact"
                     )
+                require_x11_capture(
+                    ready_path,
+                    ack_path,
+                    {
+                        "run_id": args.run_id,
+                        "process_id": os.getpid(),
+                        "window_id": x11_client_window_id,
+                        "step": action_count,
+                        "render_step": dashboard.last_render_step,
+                        "frame_file": frame_path.relative_to(
+                            run_dir
+                        ).as_posix(),
+                        "frame_sha256": sha256(frame_path),
+                    },
+                    "Timed out waiting for X11 checkpoint capture",
+                )
 
         def generate_12_parts(agent_pose):
             x = agent_pose[1]  # x and y unit is m and presented in local frame
@@ -1903,6 +1993,14 @@ def main():
                 raise RuntimeError("Strict run has no terminal dashboard to capture")
             terminal_ready_path = run_dir / "terminal_capture_ready.json"
             terminal_ack_path = run_dir / "terminal_capture_ack.txt"
+            final_frame_path = run_dir / visualization_manifest["final_image"]
+            if (
+                dashboard.last_render_step != executed_steps
+                or not final_frame_path.is_file()
+            ):
+                raise RuntimeError(
+                    "Strict terminal capture has no final rendered frame"
+                )
             write_json_atomic(
                 terminal_ready_path,
                 {
@@ -1910,6 +2008,11 @@ def main():
                     "process_id": os.getpid(),
                     "window_id": x11_client_window_id,
                     "step": executed_steps,
+                    "render_step": dashboard.last_render_step,
+                    "frame_file": final_frame_path.relative_to(
+                        run_dir
+                    ).as_posix(),
+                    "frame_sha256": sha256(final_frame_path),
                     "completion_reason": completion_reason,
                 },
             )

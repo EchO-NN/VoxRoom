@@ -82,10 +82,16 @@ artifacts automatically enables strict validation: run and validator commits
 must match, natural topology completion must be explicit, and aborted
 exploration cannot be reported as success. A terminal dashboard render is
 mandatory, including a cadence-aligned final frame. Physical-window pixels are
-captured periodically and through an explicit terminal handshake; all four
-dashboard panels must remain nonblank and change from the first to terminal
-capture. Strict success also requires a confirmed crossing edge to survive in
-the final topology. Runtime evidence pins the DETR checkout, door-weight hash,
-Habitat/SG-Nav checkout and CUDA environment before and after the episode.
+captured after application-rendered step 5, 10, and 30 handshakes, every 100
+steps thereafter, and through an explicit terminal handshake. The validator
+binds each stage capture to its saved render frame. The strict live canvas is
+locked at 3200x1800 and cannot be resized; every captured X11 client image must
+retain exactly the same dimensions. Saved cadence frames use a fixed 1600x900
+canvas and the final image uses 1920x1080. All four dashboard panels must
+remain nonblank and change from the first to terminal render. Strict success
+also requires a confirmed crossing edge to survive in the final topology.
+Runtime evidence pins the DETR
+checkout, door-weight hash, Habitat/SG-Nav checkout and CUDA environment before
+and after the episode.
 The script never downloads,
 substitutes, regenerates or falls back to different Gibson assets.
