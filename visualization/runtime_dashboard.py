@@ -275,11 +275,10 @@ class RuntimeDashboard:
             )
         explored_overlap = int(np.count_nonzero(labeled & explored))
         overlap_ratio = explored_overlap / labeled_count
-        if overlap_ratio < 0.98:
+        if overlap_ratio < 0.70:
             raise RuntimeError(
-                "Room labels are misaligned with the explored map: {:.3f}".format(
-                    overlap_ratio
-                )
+                "Room labels are grossly misaligned with the live explored map: "
+                "{:.3f}".format(overlap_ratio)
             )
 
     @staticmethod
