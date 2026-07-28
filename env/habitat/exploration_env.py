@@ -75,9 +75,23 @@ def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=2):
     col1 = min(width, start[1] + radius + 1)
     candidates = np.argwhere(navigation_free[row0:row1, col0:col1])
     if candidates.size == 0:
+        all_free = np.argwhere(navigation_free)
+        if all_free.size == 0:
+            nearest_detail = "the map contains no free cells"
+        else:
+            all_delta = all_free - np.asarray(start, dtype=np.int64)
+            all_distances = np.sum(all_delta * all_delta, axis=1)
+            nearest = all_free[int(np.argmin(all_distances))]
+            nearest_distance = float(np.sqrt(np.min(all_distances)))
+            nearest_detail = "nearest={} distance_cells={:.3f}".format(
+                (int(nearest[0]), int(nearest[1])),
+                nearest_distance,
+            )
         raise RuntimeError(
-            "Current agent cell has no VoxRoom free anchor within {} cells".format(
-                radius
+            "Current agent cell {} has no VoxRoom free anchor within {} cells; {}".format(
+                start,
+                radius,
+                nearest_detail,
             )
         )
     candidates[:, 0] += row0
