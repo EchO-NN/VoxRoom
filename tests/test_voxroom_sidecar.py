@@ -78,6 +78,11 @@ class VoxRoomGeometryTests(unittest.TestCase):
         self.assertTrue(info["gt_exp"][1, 4])
         self.assertFalse(info["voxroom_navigation_free"][1, 4])
 
+        reset_info = {}
+        apply_navigation_projection(reset_info, navigation)
+        self.assertEqual(reset_info["gt_map"].shape, free.shape)
+        self.assertEqual(reset_info["gt_exp"].shape, free.shape)
+
     def test_normalized_depth_is_restored_to_meters_without_downsampling(self):
         normalized = np.asarray(
             [[[0.0], [0.25]], [[0.5], [1.0]]],

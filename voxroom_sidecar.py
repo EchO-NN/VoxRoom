@@ -24,9 +24,12 @@ def load_navigation_projection(path, expected_step, expected_shape):
         raise FileNotFoundError(
             "VoxRoom navigation projection is missing: {}".format(projection_path)
         )
-    expected_shape = tuple(int(value) for value in expected_shape)
-    if len(expected_shape) != 2 or min(expected_shape) < 1:
-        raise ValueError("Active Room navigation shape is invalid: {}".format(expected_shape))
+    if expected_shape is not None:
+        expected_shape = tuple(int(value) for value in expected_shape)
+        if len(expected_shape) != 2 or min(expected_shape) < 1:
+            raise ValueError(
+                "Active Room navigation shape is invalid: {}".format(expected_shape)
+            )
     with np.load(projection_path, allow_pickle=False) as payload:
         required = {
             "format_version",
@@ -67,7 +70,7 @@ def load_navigation_projection(path, expected_step, expected_shape):
                     int(expected_step),
                 )
             )
-        if shape != expected_shape:
+        if expected_shape is not None and shape != expected_shape:
             raise RuntimeError(
                 "VoxRoom navigation shape {} differs from Active Room {}".format(
                     shape,
@@ -126,10 +129,18 @@ def load_navigation_projection(path, expected_step, expected_shape):
 
 
 def apply_navigation_projection(info, navigation):
-    if "gt_map" not in info or "gt_exp" not in info:
-        raise KeyError("Active Room info has no navigation map to replace")
-    expected_shape = np.asarray(info["gt_map"]).shape
-    if np.asarray(info["gt_exp"]).shape != expected_shape:
+    has_obstacle_map = "gt_map" in info
+    has_explored_map = "gt_exp" in info
+    if has_obstacle_map != has_explored_map:
+        raise RuntimeError(
+            "Active Room info contains only one half of its navigation map"
+        )
+    expected_shape = (
+        np.asarray(info["gt_map"]).shape
+        if has_obstacle_map
+        else np.asarray(navigation["free"]).shape
+    )
+    if has_explored_map and np.asarray(info["gt_exp"]).shape != expected_shape:
         raise RuntimeError("Active Room obstacle and explored maps have different shapes")
     for name in ("free", "occupied", "observed", "unknown"):
         if np.asarray(navigation[name]).shape != expected_shape:
@@ -296,7 +307,11 @@ class VoxRoomSidecarClient:
         navigation = load_navigation_projection(
             response.get("navigation_projection_path", ""),
             expected_step=simulator_step,
-            expected_shape=np.asarray(info["gt_map"]).shape,
+            expected_shape=(
+                np.asarray(info["gt_map"]).shape
+                if "gt_map" in info
+                else None
+            ),
         )
         apply_navigation_projection(info, navigation)
         frame_path.unlink()
