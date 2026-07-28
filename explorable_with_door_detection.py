@@ -1700,7 +1700,21 @@ def main():
             # consider_door if true, consider door when path planning
             if stg:
                 stg.reverse()
-                action_value = action_generator(locs, stg)
+                short_term_distance = float(
+                    np.linalg.norm(
+                        np.asarray(stg, dtype=np.float64)
+                        - np.asarray(locs[:2], dtype=np.float64)
+                    )
+                )
+                action_value = (
+                    None
+                    if short_term_distance <= 1.0e-8
+                    else action_generator(locs, stg)
+                )
+                if action_value is None and short_term_distance > 1.0e-8:
+                    raise RuntimeError(
+                        "Original action generator returned no action for a nonzero short-term goal"
+                    )
             else:
                 action_value = 0  # defualt action: turn_left
             achieve_flag = False
@@ -1708,7 +1722,14 @@ def main():
                 0]) * 100 / 5) > achieve_criterion:  # pu.get_l2_distance(long_term_goal[0], 120, long_term_goal[1], 120)
                 #print('dist to goal {}'.format(pu.get_l2_distance(long_term_goal[0], (locs[1])*100/5, long_term_goal[1], (locs[0])*100/5)))
                 # means not achieving the goal
-                locs, stg, long_term_goal, _ = take_action(action_value, locs, first_flag, long_term_goal, consider_door)
+                if action_value is None:
+                    achieve_flag = True
+                    record_event(
+                        "voxroom_reachable_frontier_boundary_reached",
+                        long_term_goal=long_term_goal,
+                    )
+                else:
+                    locs, stg, long_term_goal, _ = take_action(action_value, locs, first_flag, long_term_goal, consider_door)
             else:
                 achieve_flag = True
             return locs, stg, long_term_goal, achieve_flag

@@ -56,6 +56,38 @@ HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
 )
 
 
+def project_voxroom_goal_to_reachable_free(navigation_free, start, goal):
+    navigation_free = np.asarray(navigation_free, dtype=bool)
+    if navigation_free.ndim != 2 or navigation_free.size == 0:
+        raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
+    start = tuple(int(value) for value in start)
+    goal = tuple(int(value) for value in goal)
+    height, width = navigation_free.shape
+    for name, cell in (("start", start), ("goal", goal)):
+        if not (0 <= cell[0] < height and 0 <= cell[1] < width):
+            raise ValueError("{} cell is outside the VoxRoom navigation map".format(name))
+    if not navigation_free[start]:
+        raise RuntimeError("Current agent cell is not free in the VoxRoom navigation map")
+
+    _, component_labels = cv2.connectedComponents(
+        navigation_free.astype(np.uint8),
+        connectivity=8,
+    )
+    start_component = int(component_labels[start])
+    if start_component <= 0:
+        raise RuntimeError("VoxRoom navigation map did not label the start component")
+    if int(component_labels[goal]) == start_component:
+        return goal
+
+    candidates = np.argwhere(component_labels == start_component)
+    if candidates.size == 0:
+        raise RuntimeError("VoxRoom start component contains no free cells")
+    delta = candidates - np.asarray(goal, dtype=np.int64)
+    distances = np.sum(delta * delta, axis=1)
+    selected = candidates[int(np.argmin(distances))]
+    return (int(selected[0]), int(selected[1]))
+
+
 def habitat_depth_to_meters(depth, minimum_depth_m, maximum_depth_m, normalized):
     values = np.asarray(depth, dtype=np.float32)
     if values.ndim == 3 and values.shape[2] == 1:
@@ -910,6 +942,17 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
     ):
 
         [gx1, gx2, gy1, gy2] = planning_window
+        strict_voxroom_navigation = navigation_free is not None
+        if strict_voxroom_navigation:
+            navigation_free = np.asarray(navigation_free, dtype=bool)
+            if navigation_free.shape != grid.shape:
+                raise RuntimeError("VoxRoom navigation-free map shape changed during planning")
+            projected_goal = project_voxroom_goal_to_reachable_free(
+                navigation_free,
+                start,
+                goal,
+            )
+            goal[0], goal[1] = projected_goal
 
         x1 = min(start[0], goal[0])
         x2 = max(start[0], goal[0])
@@ -943,16 +986,8 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         y1 = max(y1, ey1)
         y2 = min(y2, ey2)
 
-        strict_voxroom_navigation = navigation_free is not None
         if strict_voxroom_navigation:
-            navigation_free = np.asarray(navigation_free, dtype=bool)
-            if navigation_free.shape != grid.shape:
-                raise RuntimeError("VoxRoom navigation-free map shape changed during planning")
             traversible = navigation_free[x1:x2, y1:y2].copy()
-            if not navigation_free[int(start[0]), int(start[1])]:
-                raise RuntimeError("Current agent cell is not free in the VoxRoom navigation map")
-            if not navigation_free[int(goal[0]), int(goal[1])]:
-                return (float(start[0]), float(start[1]))
         else:
             traversible = skimage.morphology.binary_dilation(
                             grid[x1:x2, y1:y2],

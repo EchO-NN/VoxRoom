@@ -9,11 +9,38 @@ import quaternion
 from env.habitat.exploration_env import (
     habitat_depth_to_meters,
     habitat_states_to_voxroom,
+    project_voxroom_goal_to_reachable_free,
 )
 from voxroom_sidecar import apply_navigation_projection, load_navigation_projection
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
+    def test_frontier_goal_projects_to_nearest_start_component_free_cell(self):
+        navigation_free = np.zeros((8, 10), dtype=bool)
+        navigation_free[1:5, 1:4] = True
+        navigation_free[5:7, 7:9] = True
+
+        projected = project_voxroom_goal_to_reachable_free(
+            navigation_free,
+            start=(2, 2),
+            goal=(6, 8),
+        )
+
+        self.assertEqual(projected, (4, 3))
+        self.assertTrue(navigation_free[projected])
+
+    def test_frontier_goal_keeps_goal_inside_start_component(self):
+        navigation_free = np.zeros((6, 7), dtype=bool)
+        navigation_free[1:5, 1:6] = True
+
+        projected = project_voxroom_goal_to_reachable_free(
+            navigation_free,
+            start=(2, 2),
+            goal=(4, 5),
+        )
+
+        self.assertEqual(projected, (4, 5))
+
     def test_navigation_projection_preserves_outside_and_flips_rows(self):
         free = np.zeros((4, 5), dtype=bool)
         occupied = np.zeros_like(free)
