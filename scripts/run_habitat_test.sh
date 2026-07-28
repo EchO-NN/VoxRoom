@@ -294,15 +294,21 @@ verify_live_window() {
     DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
         timeout --signal=TERM --kill-after=2s 5s \
         xwininfo -id "$candidate_id" 2>/dev/null |
-        grep -Fq "Map State: IsViewable"
+        grep -Fq "Map State: IsViewable" || return 1
+    window_viewable_checks=$((window_viewable_checks + 1))
+    last_window_viewable_unix="$(date +%s.%N)"
 }
 
 window_id=""
 physical_session_checks=0
 last_physical_session_check_unix=0
+window_viewable_checks=0
+last_window_viewable_unix=0
 checkpoint_steps=""
 checkpoint_count=0
 next_checkpoint="$WINDOW_CHECKPOINT_EVERY_STEPS"
+terminal_captured=0
+terminal_step=0
 
 capture_ready_checkpoint() {
     local checkpoint_label
@@ -350,6 +356,46 @@ capture_ready_checkpoint() {
     next_checkpoint=$((next_checkpoint + WINDOW_CHECKPOINT_EVERY_STEPS))
 }
 
+capture_terminal_if_ready() {
+    local current_progress
+    local ready_run_id
+    local ready_process_id
+    local ready_window_id
+    local ready_step
+    [[ "$terminal_captured" == "0" ]] || return 0
+    [[ -s "$RUN_DIR/terminal_capture_ready.json" ]] || return 0
+    if [[ -z "$window_id" || ! -s "$RUN_DIR/progress.jsonl" ]]; then
+        echo "Terminal capture request appeared before live-window initialization" >&2
+        return 1
+    fi
+    current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
+    read -r ready_run_id ready_process_id ready_window_id ready_step < <(
+        timeout --signal=TERM --kill-after=2s 10s \
+            "$PYTHON" -c \
+            'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"])' \
+            "$RUN_DIR/terminal_capture_ready.json"
+    )
+    if [[ "$ready_run_id" != "$RUN_ID" \
+        || "$ready_process_id" != "$run_pid" \
+        || "$ready_window_id" != "$window_id" \
+        || "$ready_step" != "$current_progress" ]]; then
+        echo "Terminal capture handshake identity mismatch" >&2
+        return 1
+    fi
+    verify_live_window "$window_id"
+    DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
+        timeout --signal=TERM --kill-after=5s 30s \
+        "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
+        --window-id "$window_id" \
+        --window-output "$RUN_DIR/window_terminal.png" \
+        --desktop-output "$RUN_DIR/live_desktop_terminal.png"
+    printf '%s\n' "$RUN_ID" >"$RUN_DIR/.terminal_capture_ack.tmp"
+    mv "$RUN_DIR/.terminal_capture_ack.tmp" \
+        "$RUN_DIR/terminal_capture_ack.txt"
+    terminal_step="$current_progress"
+    terminal_captured=1
+}
+
 startup_deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
 while ((SECONDS < startup_deadline)); do
     if ! kill -0 "$run_pid" 2>/dev/null; then
@@ -385,17 +431,35 @@ while ((SECONDS < first_refresh_deadline)); do
     if ! kill -0 "$run_pid" 2>/dev/null; then
         break
     fi
+    if ! verify_live_window "$window_id"; then
+        if ! kill -0 "$run_pid" 2>/dev/null; then
+            break
+        fi
+        echo "The process-owned live visualization window became unavailable" >&2
+        exit 1
+    fi
     capture_ready_checkpoint
     first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    ((first_step >= first_refresh_target)) && break
+    if ((first_step >= first_refresh_target)); then
+        break
+    fi
+    capture_terminal_if_ready
+    if [[ "$terminal_captured" == "1" ]]; then
+        break
+    fi
     sleep 1
 done
 first_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
 if ((first_step < first_refresh_target)); then
+    if [[ "$terminal_captured" == "1" ]]; then
+        echo "The episode completed before the first visual refresh" >&2
+        exit 1
+    fi
     echo "The live window did not complete its first visual refresh" >&2
     exit 1
 fi
 
+verify_live_window "$window_id"
 DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
     timeout --signal=TERM --kill-after=5s 30s \
     "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
@@ -409,17 +473,35 @@ while ((SECONDS < later_deadline)); do
     if ! kill -0 "$run_pid" 2>/dev/null; then
         break
     fi
+    if ! verify_live_window "$window_id"; then
+        if ! kill -0 "$run_pid" 2>/dev/null; then
+            break
+        fi
+        echo "The process-owned live visualization window became unavailable" >&2
+        exit 1
+    fi
     capture_ready_checkpoint
     current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
-    ((current_step >= later_target)) && break
+    if ((current_step >= later_target)); then
+        break
+    fi
+    capture_terminal_if_ready
+    if [[ "$terminal_captured" == "1" ]]; then
+        break
+    fi
     sleep 1
 done
 current_step="$(wc -l <"$RUN_DIR/progress.jsonl")"
 if ((current_step < later_target)); then
+    if [[ "$terminal_captured" == "1" ]]; then
+        echo "The episode completed before three visual control steps elapsed" >&2
+        exit 1
+    fi
     echo "The visualization did not advance by three control steps" >&2
     exit 1
 fi
 
+verify_live_window "$window_id"
 DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
     timeout --signal=TERM --kill-after=5s 30s \
     "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
@@ -436,10 +518,6 @@ last_progress="$current_step"
 last_progress_at="$SECONDS"
 mid_target=$((current_step + 20))
 mid_step=0
-terminal_captured=0
-terminal_step=0
-window_viewable_checks=2
-last_window_viewable_unix="$(date +%s.%N)"
 run_deadline=$((SECONDS + RUN_TIMEOUT_SECONDS))
 while kill -0 "$run_pid" 2>/dev/null; do
     sleep 2
@@ -453,8 +531,6 @@ while kill -0 "$run_pid" 2>/dev/null; do
         echo "The process-owned live visualization window became unavailable" >&2
         exit 1
     fi
-    window_viewable_checks=$((window_viewable_checks + 1))
-    last_window_viewable_unix="$(date +%s.%N)"
     capture_ready_checkpoint
     current_progress="$(wc -l <"$RUN_DIR/progress.jsonl")"
     if ((current_progress > last_progress)); then
@@ -469,34 +545,7 @@ while kill -0 "$run_pid" 2>/dev/null; do
             --window-output "$RUN_DIR/window_mid.png"
         mid_step="$current_progress"
     fi
-    if [[ "$terminal_captured" == "0" \
-        && -s "$RUN_DIR/terminal_capture_ready.json" ]]; then
-        read -r ready_run_id ready_process_id ready_window_id ready_step < <(
-            timeout --signal=TERM --kill-after=2s 10s \
-                "$PYTHON" -c \
-                'import json,sys; d=json.load(open(sys.argv[1])); print(d["run_id"], d["process_id"], d["window_id"], d["step"])' \
-                "$RUN_DIR/terminal_capture_ready.json"
-        )
-        if [[ "$ready_run_id" != "$RUN_ID" \
-            || "$ready_process_id" != "$run_pid" \
-            || "$ready_window_id" != "$window_id" \
-            || "$ready_step" != "$current_progress" ]]; then
-            echo "Terminal capture handshake identity mismatch" >&2
-            exit 1
-        fi
-        verify_live_window "$window_id"
-        DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
-            timeout --signal=TERM --kill-after=5s 30s \
-            "$PYTHON" "$ROOT_DIR/scripts/capture_x11.py" \
-            --window-id "$window_id" \
-            --window-output "$RUN_DIR/window_terminal.png" \
-            --desktop-output "$RUN_DIR/live_desktop_terminal.png"
-        printf '%s\n' "$RUN_ID" >"$RUN_DIR/.terminal_capture_ack.tmp"
-        mv "$RUN_DIR/.terminal_capture_ack.tmp" \
-            "$RUN_DIR/terminal_capture_ack.txt"
-        terminal_step="$current_progress"
-        terminal_captured=1
-    fi
+    capture_terminal_if_ready
     if ((SECONDS - last_progress_at > STALL_TIMEOUT_SECONDS)); then
         echo "Control progress stalled at step $last_progress" >&2
         exit 1
@@ -533,6 +582,10 @@ run_pid=""
 if [[ "$run_status" -ne 0 ]]; then
     echo "Active Room Segmentation exited with status $run_status" >&2
     exit "$run_status"
+fi
+if [[ "$RUN_CONTEXT_REQUIRED" == "1" && "$terminal_captured" != "1" ]]; then
+    echo "Strict run exited without a terminal physical-window capture" >&2
+    exit 1
 fi
 
 timeout --signal=TERM --kill-after=10s 300s \

@@ -193,6 +193,19 @@ def expected_physical_checkpoint_steps(executed_steps, checkpoint_every_steps):
     )
 
 
+def require_mid_capture(later_step, executed_steps, mid_step):
+    if later_step < 1 or executed_steps < later_step or mid_step < 0:
+        raise RuntimeError("Live-window capture step metadata is invalid")
+    target_step = later_step + 20
+    if executed_steps < target_step:
+        if mid_step != 0:
+            raise RuntimeError("Unexpected mid-run capture before its target step")
+        return False
+    if not target_step <= mid_step <= executed_steps:
+        raise RuntimeError("Required mid-run capture is missing or out of range")
+    return True
+
+
 def collect_artifact_hashes(run_dir):
     hashes = {}
     sizes = {}
@@ -259,7 +272,6 @@ def main():
     if context_mode:
         paths.update(
             {
-                "window_mid": run_dir / "window_mid.png",
                 "window_terminal": run_dir / "window_terminal.png",
                 "desktop_terminal": run_dir / "live_desktop_terminal.png",
                 "terminal_ready": run_dir / "terminal_capture_ready.json",
@@ -727,11 +739,28 @@ def main():
             (960, 540),
         ),
     }
+    has_mid_capture = False
     if context_mode:
-        image_sizes["window_mid"] = check_image(
-            paths["window_mid"],
-            (640, 480),
+        later_step = int(visualization.get("later_step", 0))
+        mid_step = int(visualization.get("mid_step", -1))
+        has_mid_capture = require_mid_capture(
+            later_step,
+            executed_steps,
+            mid_step,
         )
+        mid_path = run_dir / "window_mid.png"
+        if has_mid_capture:
+            if not mid_path.is_file():
+                raise FileNotFoundError(
+                    "Missing run evidence: {}".format(mid_path)
+                )
+            paths["window_mid"] = mid_path
+            image_sizes["window_mid"] = check_image(
+                paths["window_mid"],
+                (640, 480),
+            )
+        elif mid_path.exists():
+            raise RuntimeError("Mid-run capture exists without matching step evidence")
         image_sizes["window_terminal"] = check_image(
             paths["window_terminal"],
             (640, 480),
@@ -749,7 +778,7 @@ def main():
             "visualization_final",
             *(
                 (
-                    "window_mid",
+                    *(("window_mid",) if has_mid_capture else ()),
                     "window_terminal",
                     "desktop_terminal",
                 )
@@ -760,15 +789,19 @@ def main():
     }
     if image_hashes["window_first"] == image_hashes["window_later"]:
         raise RuntimeError("The live window pixels did not change across control steps")
-    if context_mode and len(
-        {
-            image_hashes["window_first"],
-            image_hashes["window_later"],
-            image_hashes["window_mid"],
-            image_hashes["window_terminal"],
-        }
-    ) != 4:
-        raise RuntimeError("The live window did not change across four captures")
+    if context_mode:
+        live_capture_names = [
+            "window_first",
+            "window_later",
+            *(["window_mid"] if has_mid_capture else []),
+            "window_terminal",
+        ]
+        if len({image_hashes[name] for name in live_capture_names}) != len(
+            live_capture_names
+        ):
+            raise RuntimeError(
+                "The live window did not change across required captures"
+            )
     panel_metrics = None
     checkpoint_steps = []
     checkpoint_hashes = []

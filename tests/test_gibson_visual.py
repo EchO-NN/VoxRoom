@@ -30,6 +30,7 @@ from scripts.validate_run import (
     detect_run_context,
     expected_physical_checkpoint_steps,
     expected_visualization_frames,
+    require_mid_capture,
     require_fail_fast_sources,
 )
 
@@ -161,6 +162,17 @@ class GibsonVisualPreparationTests(unittest.TestCase):
             expected_physical_checkpoint_steps(200, 100),
             [100, 200],
         )
+
+    def test_mid_capture_is_optional_only_when_episode_ends_before_target(self):
+        self.assertFalse(require_mid_capture(15, 34, 0))
+        self.assertTrue(require_mid_capture(15, 35, 35))
+        self.assertTrue(require_mid_capture(15, 40, 39))
+        with self.assertRaises(RuntimeError):
+            require_mid_capture(15, 35, 0)
+        with self.assertRaises(RuntimeError):
+            require_mid_capture(15, 34, 34)
+        with self.assertRaises(RuntimeError):
+            require_mid_capture(15, 40, 41)
 
     def test_artifact_hash_closure_excludes_only_its_own_report(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
