@@ -243,7 +243,7 @@ class VisualReproductionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "door barriers do not separate room labels",
+            "door cuts do not separate room labels",
         ):
             RuntimeDashboard.navigation_partitioned_room_labels(
                 occupied,
@@ -251,6 +251,23 @@ class VisualReproductionTests(unittest.TestCase):
                 labels,
                 [],
             )
+
+    def test_door_cut_extends_to_the_displayed_navigation_boundary(self):
+        occupied = np.zeros((14, 22), dtype=np.float32)
+        explored = np.zeros_like(occupied)
+        explored[2:12, 2:20] = 1
+        door = {"start": [10, 6], "end": [10, 8]}
+
+        cuts = RuntimeDashboard.navigation_door_cut_segments(
+            occupied,
+            explored,
+            [door],
+        )
+
+        self.assertEqual(len(cuts), 1)
+        start, end = cuts[0]
+        np.testing.assert_allclose(start, [10, 1])
+        np.testing.assert_allclose(end, [10, 12])
 
     def test_room_partition_never_colors_occupied_or_unexplored_cells(self):
         occupied = np.zeros((10, 12), dtype=np.float32)

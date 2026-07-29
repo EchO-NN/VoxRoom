@@ -323,25 +323,12 @@ class RuntimeDashboard:
             return seed_labels.astype(np.uint16)
 
         door_barrier = np.zeros(occupied_mask.shape, dtype=np.uint8)
-        for door in doors or []:
-            if not isinstance(door, dict):
-                raise TypeError("Detected door entries must be dictionaries")
-            start = np.asarray(door.get("start"), dtype=np.float64).reshape(-1)
-            end = np.asarray(door.get("end"), dtype=np.float64).reshape(-1)
-            if (
-                start.size != 2
-                or end.size != 2
-                or not np.all(np.isfinite(start))
-                or not np.all(np.isfinite(end))
-            ):
-                raise RuntimeError("Detected door endpoints are invalid")
-            door_vector = end - start
-            door_length = float(np.linalg.norm(door_vector))
-            if door_length < 1.0:
-                raise RuntimeError("Detected door line is shorter than one map cell")
-            door_direction = door_vector / door_length
-            extended_start = start - 6.0 * door_direction
-            extended_end = end + 6.0 * door_direction
+        door_cuts = RuntimeDashboard.navigation_door_cut_segments(
+            occupied_mask,
+            explored_mask,
+            doors,
+        )
+        for extended_start, extended_end in door_cuts:
             cv2.line(
                 door_barrier,
                 tuple(np.rint(extended_start).astype(np.int32)),
@@ -363,7 +350,7 @@ class RuntimeDashboard:
             component_room_ids = component_room_ids[component_room_ids > 0]
             if component_room_ids.size > 1:
                 raise RuntimeError(
-                    "Detected door barriers do not separate room labels {} "
+                    "Detected door cuts do not separate room labels {} "
                     "in navigation component {}".format(
                         component_room_ids.tolist(),
                         component_id,
@@ -372,6 +359,62 @@ class RuntimeDashboard:
             if component_room_ids.size == 1:
                 partition[component_mask] = np.uint16(component_room_ids[0])
         return partition
+
+    @staticmethod
+    def navigation_door_cut_segments(occupied, explored, doors):
+        occupied_mask = np.asarray(occupied) > 0.5
+        explored_mask = np.asarray(explored) > 0.5
+        if occupied_mask.ndim != 2 or explored_mask.shape != occupied_mask.shape:
+            raise RuntimeError(
+                "Occupied and explored maps must have one two-dimensional shape"
+            )
+        height, width = occupied_mask.shape
+        blocking = occupied_mask | ~explored_mask
+        max_extension = int(np.ceil(np.hypot(height, width))) + 2
+        cuts = []
+
+        def extend_to_blocker(anchor, direction):
+            last = np.asarray(anchor, dtype=np.float64).copy()
+            for distance in range(1, max_extension + 1):
+                candidate = anchor + float(distance) * direction
+                column, row = np.rint(candidate).astype(np.int64)
+                if not (0 <= row < height and 0 <= column < width):
+                    return np.asarray(
+                        [
+                            np.clip(column, 0, width - 1),
+                            np.clip(row, 0, height - 1),
+                        ],
+                        dtype=np.float64,
+                    )
+                last = candidate
+                if blocking[row, column]:
+                    return last
+            raise RuntimeError("Door cut did not reach a map blocker")
+
+        for door in doors or []:
+            if not isinstance(door, dict):
+                raise TypeError("Detected door entries must be dictionaries")
+            start = np.asarray(door.get("start"), dtype=np.float64).reshape(-1)
+            end = np.asarray(door.get("end"), dtype=np.float64).reshape(-1)
+            if (
+                start.size != 2
+                or end.size != 2
+                or not np.all(np.isfinite(start))
+                or not np.all(np.isfinite(end))
+            ):
+                raise RuntimeError("Detected door endpoints are invalid")
+            door_vector = end - start
+            door_length = float(np.linalg.norm(door_vector))
+            if door_length < 1.0:
+                raise RuntimeError("Detected door line is shorter than one map cell")
+            door_direction = door_vector / door_length
+            cuts.append(
+                (
+                    extend_to_blocker(start, -door_direction),
+                    extend_to_blocker(end, door_direction),
+                )
+            )
+        return cuts
 
     @staticmethod
     def _node_positions(nodes):
@@ -503,11 +546,11 @@ class RuntimeDashboard:
                 linewidth=1.2,
                 alpha=0.8,
             )
-        for door in doors:
-            start = door.get("start")
-            end = door.get("end")
-            if start is None or end is None:
-                continue
+        for start, end in self.navigation_door_cut_segments(
+            occupied,
+            explored,
+            doors,
+        ):
             axis.plot(
                 [start[0], end[0]],
                 [start[1], end[1]],
