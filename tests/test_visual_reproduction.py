@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from PIL import Image, ImageStat
 
+from frontier_detection import Frontier_detection
 from topomap_construction import Topomap_construction
 from visualization import RuntimeDashboard, TopologyEventRecorder
 from scripts.validate_run import check_capture_marker
@@ -212,100 +213,29 @@ class VisualReproductionTests(unittest.TestCase):
             labels_source.transpose(),
         )
 
-    def test_room_partition_fills_free_space_without_crossing_doors(self):
-        occupied = np.zeros((12, 20), dtype=np.float32)
-        explored = np.ones_like(occupied)
-        labels = np.zeros_like(occupied, dtype=np.uint16)
-        labels[5:8, 2:5] = 1
-        labels[5:8, 15:18] = 2
-        doors = [{"start": [9, 0], "end": [9, 11]}]
+    def test_original_door_barrier_stays_on_the_detected_segment(self):
+        detector = Frontier_detection(map_size=24)
+        detector.exp_map = np.zeros((24, 24), dtype=np.uint8)
 
-        partition = RuntimeDashboard.navigation_partitioned_room_labels(
-            occupied,
-            explored,
-            labels,
-            doors,
-        )
+        door_cells = detector.close_door([10, 6], [10, 8])
 
-        self.assertEqual(partition.dtype, np.uint16)
-        self.assertEqual(partition[6, 1], 1)
-        self.assertEqual(partition[6, 18], 2)
-        self.assertEqual(partition[6, 9], 0)
-        self.assertFalse(np.any(partition[:, :8] == 2))
-        self.assertFalse(np.any(partition[:, 11:] == 1))
+        self.assertIn([6, 10], door_cells)
+        self.assertIn([8, 10], door_cells)
+        self.assertNotIn([0, 10], door_cells)
+        self.assertNotIn([23, 10], door_cells)
 
-    def test_dashboard_uses_topology_waypoints_as_room_seeds(self):
-        snapshot = {
-            "current_node_id": 1,
-            "nodes": [
-                {"id": 0, "room_entries": [[7, 5]]},
-                {"id": 1, "room_entries": [[12, 5]]},
-                {"id": 2, "room_entries": []},
-            ],
-        }
+    def test_room_label_map_does_not_complete_unassigned_free_space(self):
+        topology = Topomap_construction(map_size=20)
+        topology._add_rooms(1)
+        topology.g.vs[0]["room_exp"] = [[5, 3], [5, 4]]
+        topology.g.vs[1]["room_exp"] = [[5, 15], [5, 16]]
 
-        labels = RuntimeDashboard.topology_room_seed_labels(
-            (16, 20),
-            snapshot,
-            (15, 11),
-        )
+        labels = topology.room_label_map((12, 20))
 
-        self.assertEqual(labels[5, 7], 1)
-        self.assertEqual(labels[5, 12], 2)
-        self.assertEqual(np.count_nonzero(labels == 3), 0)
-
-    def test_room_partition_rejects_non_door_voronoi_boundary(self):
-        occupied = np.zeros((12, 20), dtype=np.float32)
-        explored = np.ones_like(occupied)
-        labels = np.zeros_like(occupied, dtype=np.uint16)
-        labels[6, 3] = 1
-        labels[6, 16] = 2
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "door partition lines do not separate room labels",
-        ):
-            RuntimeDashboard.navigation_partitioned_room_labels(
-                occupied,
-                explored,
-                labels,
-                [],
-            )
-
-    def test_door_partition_line_extends_to_the_map_boundary(self):
-        occupied = np.zeros((14, 22), dtype=np.float32)
-        explored = np.zeros_like(occupied)
-        explored[2:12, 2:20] = 1
-        door = {"start": [10, 6], "end": [10, 8]}
-
-        cuts = RuntimeDashboard.navigation_door_partition_lines(
-            occupied.shape,
-            [door],
-        )
-
-        self.assertEqual(len(cuts), 1)
-        start, end = cuts[0]
-        np.testing.assert_allclose(start, [10, 0])
-        np.testing.assert_allclose(end, [10, 13])
-
-    def test_room_partition_never_colors_occupied_or_unexplored_cells(self):
-        occupied = np.zeros((10, 12), dtype=np.float32)
-        explored = np.zeros_like(occupied)
-        explored[2:8, 2:10] = 1
-        occupied[4:6, 5:7] = 1
-        labels = np.zeros_like(occupied, dtype=np.uint16)
-        labels[3, 3] = 1
-
-        partition = RuntimeDashboard.navigation_partitioned_room_labels(
-            occupied,
-            explored,
-            labels,
-            [],
-        )
-
-        self.assertFalse(np.any(partition[occupied > 0.5]))
-        self.assertFalse(np.any(partition[explored <= 0.5]))
-        self.assertEqual(partition[7, 9], 1)
+        self.assertEqual(labels[5, 3], 1)
+        self.assertEqual(labels[5, 16], 2)
+        self.assertEqual(labels[5, 9], 0)
+        self.assertEqual(np.count_nonzero(labels), 4)
 
     def test_dashboard_clips_historical_room_labels_on_current_occupied(self):
         occupied = np.zeros((8, 9), dtype=np.float32)
