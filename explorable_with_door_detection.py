@@ -855,11 +855,15 @@ def main():
                 explored,
                 room_labels,
             )
+            display_doors = dashboard.transposed_door_segments(
+                detected_door_list
+            )
+            display_raw_doors = dashboard.transposed_xy_points(raw_detect_list)
             room_labels = dashboard.navigation_partitioned_room_labels(
                 occupied,
                 explored,
                 room_labels,
-                detected_door_list,
+                display_doors,
             )
             explored_ratio = float(info.get("exp_ratio") or 0.0)
             explored_area = float(info.get("exp_reward") or 0.0) * 50.0
@@ -872,8 +876,8 @@ def main():
                 agent_xy=agent_xy,
                 heading_degrees=heading_degrees,
                 goal_xy=goal_xy,
-                doors=detected_door_list,
-                raw_doors=raw_detect_list,
+                doors=display_doors,
+                raw_doors=display_raw_doors,
                 frontiers=frontiers or [],
                 trajectory_xy=list(trajectory_xy),
                 topology_snapshot=topo.snapshot(),

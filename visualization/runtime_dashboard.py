@@ -294,6 +294,42 @@ class RuntimeDashboard:
         return clipped
 
     @staticmethod
+    def transposed_door_segments(doors):
+        transposed = []
+        for door in doors or []:
+            if not isinstance(door, dict):
+                raise TypeError("Detected door entries must be dictionaries")
+            start = np.asarray(door.get("start"), dtype=np.float64).reshape(-1)
+            end = np.asarray(door.get("end"), dtype=np.float64).reshape(-1)
+            if (
+                start.size != 2
+                or end.size != 2
+                or not np.all(np.isfinite(start))
+                or not np.all(np.isfinite(end))
+            ):
+                raise RuntimeError("Detected door endpoints are invalid")
+            transposed.append(
+                {
+                    "start": [float(start[1]), float(start[0])],
+                    "end": [float(end[1]), float(end[0])],
+                }
+            )
+        return transposed
+
+    @staticmethod
+    def transposed_xy_points(points):
+        if not points:
+            return []
+        coordinates = np.asarray(points, dtype=np.float64)
+        if (
+            coordinates.ndim != 2
+            or coordinates.shape[1] < 2
+            or not np.all(np.isfinite(coordinates[:, :2]))
+        ):
+            raise RuntimeError("Map point coordinates are invalid")
+        return coordinates[:, [1, 0]].tolist()
+
+    @staticmethod
     def navigation_partitioned_room_labels(
         occupied,
         explored,

@@ -234,6 +234,26 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertFalse(np.any(partition[:, :8] == 2))
         self.assertFalse(np.any(partition[:, 11:] == 1))
 
+    def test_dashboard_transposes_door_and_raw_point_coordinates(self):
+        doors = [
+            {
+                "start": [470, 469],
+                "end": [485, 469],
+                "mid": [477, 469],
+            }
+        ]
+
+        display_doors = RuntimeDashboard.transposed_door_segments(doors)
+        display_points = RuntimeDashboard.transposed_xy_points(
+            [[470, 469], [485, 469]]
+        )
+
+        self.assertEqual(
+            display_doors,
+            [{"start": [469.0, 470.0], "end": [469.0, 485.0]}],
+        )
+        self.assertEqual(display_points, [[469.0, 470.0], [469.0, 485.0]])
+
     def test_room_partition_rejects_non_door_voronoi_boundary(self):
         occupied = np.zeros((12, 20), dtype=np.float32)
         explored = np.ones_like(occupied)
