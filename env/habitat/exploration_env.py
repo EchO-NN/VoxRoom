@@ -3,9 +3,6 @@ import os
 import pickle
 from pathlib import Path
 import sys
-import json
-import time
-import traceback
 import cv2
 import gym
 import matplotlib
@@ -57,84 +54,6 @@ HABITAT_CAMERA_NATIVE_TO_FLU = np.asarray(
     ],
     dtype=np.float64,
 )
-
-
-def snap_voxroom_start_to_free(navigation_free, start, max_radius_cells=1):
-    navigation_free = np.asarray(navigation_free, dtype=bool)
-    if navigation_free.ndim != 2 or navigation_free.size == 0:
-        raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
-    start = tuple(int(value) for value in start)
-    height, width = navigation_free.shape
-    if not (0 <= start[0] < height and 0 <= start[1] < width):
-        raise ValueError("start cell is outside the VoxRoom navigation map")
-    if navigation_free[start]:
-        return start
-    radius = int(max_radius_cells)
-    if radius < 0:
-        raise ValueError("VoxRoom start snap radius must be non-negative")
-    row0 = max(0, start[0] - radius)
-    row1 = min(height, start[0] + radius + 1)
-    col0 = max(0, start[1] - radius)
-    col1 = min(width, start[1] + radius + 1)
-    candidates = np.argwhere(navigation_free[row0:row1, col0:col1])
-    if candidates.size == 0:
-        all_free = np.argwhere(navigation_free)
-        if all_free.size == 0:
-            nearest_detail = "the map contains no free cells"
-        else:
-            all_delta = all_free - np.asarray(start, dtype=np.int64)
-            all_distances = np.sum(all_delta * all_delta, axis=1)
-            nearest = all_free[int(np.argmin(all_distances))]
-            nearest_distance = float(np.sqrt(np.min(all_distances)))
-            nearest_detail = "nearest={} distance_cells={:.3f}".format(
-                (int(nearest[0]), int(nearest[1])),
-                nearest_distance,
-            )
-        raise RuntimeError(
-            "Current agent cell {} has no VoxRoom free anchor within {} cells; {}".format(
-                start,
-                radius,
-                nearest_detail,
-            )
-        )
-    candidates[:, 0] += row0
-    candidates[:, 1] += col0
-    delta = candidates - np.asarray(start, dtype=np.int64)
-    distances = np.sum(delta * delta, axis=1)
-    selected = candidates[int(np.argmin(distances))]
-    return (int(selected[0]), int(selected[1]))
-
-
-def project_voxroom_goal_to_reachable_free(navigation_free, start, goal):
-    navigation_free = np.asarray(navigation_free, dtype=bool)
-    if navigation_free.ndim != 2 or navigation_free.size == 0:
-        raise ValueError("VoxRoom navigation-free map must be a non-empty 2D array")
-    start = tuple(int(value) for value in start)
-    goal = tuple(int(value) for value in goal)
-    height, width = navigation_free.shape
-    if not (0 <= start[0] < height and 0 <= start[1] < width):
-        raise ValueError("start cell is outside the VoxRoom navigation map")
-    if not (0 <= goal[0] < height and 0 <= goal[1] < width):
-        raise ValueError("goal cell is outside the VoxRoom navigation map")
-    if not navigation_free[start]:
-        raise RuntimeError("VoxRoom projected start cell is not free")
-    _, component_labels = cv2.connectedComponents(
-        navigation_free.astype(np.uint8),
-        connectivity=8,
-    )
-    start_component = int(component_labels[start])
-    if start_component <= 0:
-        raise RuntimeError("VoxRoom navigation map did not label the start component")
-    if int(component_labels[goal]) == start_component:
-        return goal
-
-    candidates = np.argwhere(component_labels == start_component)
-    if candidates.size == 0:
-        raise RuntimeError("VoxRoom start component contains no free cells")
-    delta = candidates - np.asarray(goal, dtype=np.int64)
-    distances = np.sum(delta * delta, axis=1)
-    selected = candidates[int(np.argmin(distances))]
-    return (int(selected[0]), int(selected[1]))
 
 
 def habitat_depth_to_meters(depth, minimum_depth_m, maximum_depth_m, normalized):
@@ -355,19 +274,10 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         # Initialize map and pose
         self.map_size_cm = args.map_size_cm
         self.mapper.reset_map(self.map_size_cm)
-        initial_heading_degrees = (
-            math.degrees(
-                habitat_rotation_yaw_in_voxroom(
-                    self._env.sim.get_agent_state(0).rotation,
-                )
-            )
-            if self.voxroom_bridge_enabled
-            else 0.0
-        )
         self.curr_loc = [
             self.map_size_cm / 100.0 / 2.0,
             self.map_size_cm / 100.0 / 2.0,
-            initial_heading_degrees,
+            0.0,
         ]
         self.curr_loc_gt = self.curr_loc
         self.last_loc_gt = self.curr_loc_gt
@@ -406,6 +316,11 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['scene_name'] = self.scene_name
         self.info['episode_id'] = self.episode_id
         self.info['episode_contract_sha256'] = self.episode_contract_sha256
+        self.info['gt_map'] = self.map
+        self.info['gt_exp'] = self.explored_map
+        self.info['active_room_map_source'] = (
+            'active_room_native_depth_projection'
+        )
         self.info.update(self._voxroom_payload(obs["depth"]))
 
 
@@ -520,6 +435,9 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['door_local_map'] = door_only_map
         self.info['depth'] = depth
         self.info['door_mask'] = door_frame_mask
+        self.info['active_room_map_source'] = (
+            'active_room_native_depth_projection'
+        )
         self.info.update(voxroom_payload)
 
         # Update collision map
@@ -735,21 +653,6 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         grid = np.rint(map_pred)
         explored = np.rint(exp_pred)
-        navigation_free = inputs.get("navigation_free_pred")
-        navigation_start = inputs.get("navigation_start_pred")
-        if navigation_free is not None:
-            navigation_free = np.asarray(navigation_free, dtype=bool)
-            if navigation_free.shape != grid.shape:
-                raise RuntimeError(
-                    "VoxRoom navigation-free map has shape {}, expected {}".format(
-                        navigation_free.shape,
-                        grid.shape,
-                    )
-                )
-            if navigation_start is None:
-                raise RuntimeError("VoxRoom navigation is missing the exact planner start")
-        elif navigation_start is not None:
-            raise RuntimeError("VoxRoom planner start was provided without navigation")
 
         # Get pose prediction and global policy planning window
         start_x, start_y, start_o, gx1, gx2, gy1, gy2 = inputs['pose_pred']
@@ -769,20 +672,6 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         start = [int(r * 100.0/args.map_resolution - gx1),
                  int(c * 100.0/args.map_resolution - gy1)]
         start = pu.threshold_poses(start, grid.shape)
-        if navigation_free is not None:
-            navigation_start = np.asarray(
-                navigation_start,
-                dtype=np.int64,
-            ).reshape(-1)
-            if navigation_start.size != 2:
-                raise RuntimeError("VoxRoom planner start must contain two grid coordinates")
-            start = list(
-                snap_voxroom_start_to_free(
-                    navigation_free,
-                    navigation_start,
-                    max_radius_cells=1,
-                )
-            )
         #TODO: try reducing this
 
         #self.visited[gx1:gx2, gy1:gy2][start[0]-2:start[0]+3,
@@ -830,37 +719,13 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.intrinsic_rew = -exp_pred[goal[0], goal[1]]
 
         # Get short-term goal
-        try:
-            stg = self._get_stg(
-                grid,
-                explored,
-                start,
-                np.copy(goal),
-                planning_window,
-                navigation_free=navigation_free,
-            )
-        except (RuntimeError, ValueError) as exc:
-            if navigation_free is not None:
-                failure_path = Path(self.args.run_dir) / "planner_failure.json"
-                temporary = failure_path.with_name(
-                    ".{}.{}.tmp".format(failure_path.name, os.getpid())
-                )
-                payload = {
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "start": [int(value) for value in start],
-                    "goal": [int(value) for value in goal],
-                    "navigation_free_cells": int(np.count_nonzero(navigation_free)),
-                    "navigation_shape": [int(value) for value in navigation_free.shape],
-                    "timestamp_unix": time.time(),
-                    "traceback": traceback.format_exc(),
-                }
-                temporary.write_text(
-                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-                os.replace(str(temporary), str(failure_path))
-            raise
+        stg = self._get_stg(
+            grid,
+            explored,
+            start,
+            np.copy(goal),
+            planning_window,
+        )
 
         # Find GT action
         if self.args.eval or not self.args.train_local:
@@ -1046,30 +911,9 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         return episode_map
 
 
-    def _get_stg(
-        self,
-        grid,
-        explored,
-        start,
-        goal,
-        planning_window,
-        navigation_free=None,
-    ):
+    def _get_stg(self, grid, explored, start, goal, planning_window):
 
         [gx1, gx2, gy1, gy2] = planning_window
-        strict_voxroom_navigation = navigation_free is not None
-        if strict_voxroom_navigation:
-            navigation_free = np.asarray(navigation_free, dtype=bool)
-            if navigation_free.shape != grid.shape:
-                raise RuntimeError("VoxRoom navigation-free map shape changed during planning")
-            if not navigation_free[tuple(start)]:
-                raise RuntimeError("Exact VoxRoom planner start is not free")
-            projected_goal = project_voxroom_goal_to_reachable_free(
-                navigation_free,
-                start,
-                goal,
-            )
-            goal[0], goal[1] = projected_goal
 
         x1 = min(start[0], goal[0])
         x2 = max(start[0], goal[0])
@@ -1103,33 +947,26 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         y1 = max(y1, ey1)
         y2 = min(y2, ey2)
 
-        if strict_voxroom_navigation:
-            traversible = navigation_free[x1:x2, y1:y2].copy()
+        traversible = skimage.morphology.binary_dilation(
+                        grid[x1:x2, y1:y2],
+                        self.selem) != True
+        traversible[self.collison_map[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 0
+        traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
+
+        traversible[int(start[0]-x1)-1:int(start[0]-x1)+2,
+                    int(start[1]-y1)-1:int(start[1]-y1)+2] = 1
+
+        if goal[0]-2 > x1 and goal[0]+3 < x2\
+            and goal[1]-2 > y1 and goal[1]+3 < y2:
+            traversible[int(goal[0]-x1)-2:int(goal[0]-x1)+3,
+                    int(goal[1]-y1)-2:int(goal[1]-y1)+3] = 1
         else:
-            traversible = skimage.morphology.binary_dilation(
-                            grid[x1:x2, y1:y2],
-                            self.selem) != True
-            traversible[self.collison_map[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 0
-            traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
-
-            traversible[int(start[0]-x1)-1:int(start[0]-x1)+2,
-                        int(start[1]-y1)-1:int(start[1]-y1)+2] = 1
-
-            if goal[0]-2 > x1 and goal[0]+3 < x2\
-                and goal[1]-2 > y1 and goal[1]+3 < y2:
-                traversible[int(goal[0]-x1)-2:int(goal[0]-x1)+3,
-                        int(goal[1]-y1)-2:int(goal[1]-y1)+3] = 1
-            else:
-                goal[0] = min(max(x1, goal[0]), x2)
-                goal[1] = min(max(y1, goal[1]), y2)
+            goal[0] = min(max(x1, goal[0]), x2)
+            goal[1] = min(max(y1, goal[1]), y2)
 
         def add_boundary(mat):
             h, w = mat.shape
-            new_mat = (
-                np.zeros((h + 2, w + 2), dtype=mat.dtype)
-                if strict_voxroom_navigation
-                else np.ones((h + 2, w + 2))
-            )
+            new_mat = np.ones((h+2,w+2))
             new_mat[1:h+1,1:w+1] = mat
             return new_mat
 
@@ -1143,8 +980,6 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         for i in range(self.args.short_goal_dist):
             stg_x, stg_y, replan = planner.get_short_term_goal([stg_x, stg_y])
         if replan:
-            if strict_voxroom_navigation:
-                return (float(start[0]), float(start[1]))
             stg_x, stg_y = start[0], start[1]
 
         else:

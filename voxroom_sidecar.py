@@ -129,19 +129,13 @@ def load_navigation_projection(path, expected_step, expected_shape):
     }
 
 
-def apply_navigation_projection(info, navigation):
-    has_obstacle_map = "gt_map" in info
-    has_explored_map = "gt_exp" in info
-    if has_obstacle_map != has_explored_map:
+def attach_voxroom_projection(info, navigation):
+    if "gt_map" not in info or "gt_exp" not in info:
         raise RuntimeError(
-            "Active Room info contains only one half of its navigation map"
+            "Active Room native obstacle and explored maps are required"
         )
-    expected_shape = (
-        np.asarray(info["gt_map"]).shape
-        if has_obstacle_map
-        else np.asarray(navigation["free"]).shape
-    )
-    if has_explored_map and np.asarray(info["gt_exp"]).shape != expected_shape:
+    expected_shape = np.asarray(info["gt_map"]).shape
+    if np.asarray(info["gt_exp"]).shape != expected_shape:
         raise RuntimeError("Active Room obstacle and explored maps have different shapes")
     for name in ("free", "occupied", "observed", "unknown"):
         if np.asarray(navigation[name]).shape != expected_shape:
@@ -152,18 +146,16 @@ def apply_navigation_projection(info, navigation):
                     expected_shape,
                 )
             )
-    outside = (
-        navigation["observed"]
-        & ~navigation["free"]
-        & ~navigation["occupied"]
-    )
-    info["gt_map"] = np.asarray(
-        navigation["occupied"] | outside,
-        dtype=np.float32,
-    )
-    info["gt_exp"] = np.asarray(navigation["observed"], dtype=np.float32)
     info["voxroom_navigation_free"] = np.asarray(
         navigation["free"],
+        dtype=np.uint8,
+    )
+    info["voxroom_navigation_occupied"] = np.asarray(
+        navigation["occupied"],
+        dtype=np.uint8,
+    )
+    info["voxroom_navigation_observed"] = np.asarray(
+        navigation["observed"],
         dtype=np.uint8,
     )
     info["voxroom_navigation_unknown"] = np.asarray(
@@ -199,65 +191,10 @@ def apply_navigation_projection(info, navigation):
             )
         )
     info["voxroom_navigation_agent_cell"] = agent_cell
-    info["navigation_map_source"] = "voxroom_last_voxel_navigation_projection"
-    info["navigation_map_step"] = int(navigation["step"])
-
-
-def active_room_pose_from_voxroom(info, map_size_cm):
-    base_pose = np.asarray(
-        info["voxroom_base_pose_world_xyzyaw"],
-        dtype=np.float64,
-    ).reshape(-1)
-    if base_pose.size != 4 or not np.all(np.isfinite(base_pose)):
-        raise RuntimeError("VoxRoom base pose is invalid")
-    map_size_m = float(map_size_cm) / 100.0
-    if not np.isfinite(map_size_m) or map_size_m <= 0.0:
-        raise ValueError("Active Room map size must be positive")
-    center_m = 0.5 * map_size_m
-    return np.asarray(
-        [
-            center_m + float(base_pose[0]),
-            center_m + float(base_pose[1]),
-            float(np.degrees(base_pose[3])),
-        ],
-        dtype=np.float64,
+    info["voxroom_navigation_map_source"] = (
+        "voxroom_last_voxel_navigation_projection"
     )
-
-
-def local_navigation_projection(info, planning_window):
-    if "voxroom_navigation_free" not in info:
-        return None, None
-    if "voxroom_navigation_agent_cell" not in info:
-        raise RuntimeError("VoxRoom navigation is missing the exact agent cell")
-    gx1, gx2, gy1, gy2 = (int(value) for value in planning_window)
-    navigation_free = np.asarray(info["voxroom_navigation_free"], dtype=bool)
-    if not (
-        0 <= gx1 < gx2 <= navigation_free.shape[0]
-        and 0 <= gy1 < gy2 <= navigation_free.shape[1]
-    ):
-        raise RuntimeError("Active Room local-map window is outside VoxRoom navigation")
-    agent_cell = np.asarray(
-        info["voxroom_navigation_agent_cell"],
-        dtype=np.int64,
-    ).reshape(-1)
-    if agent_cell.size != 2:
-        raise RuntimeError("VoxRoom navigation agent cell is invalid")
-    local_agent_cell = np.asarray(
-        [int(agent_cell[0]) - gx1, int(agent_cell[1]) - gy1],
-        dtype=np.int32,
-    )
-    local_navigation = navigation_free[gx1:gx2, gy1:gy2].copy()
-    if not (
-        0 <= int(local_agent_cell[0]) < local_navigation.shape[0]
-        and 0 <= int(local_agent_cell[1]) < local_navigation.shape[1]
-    ):
-        raise RuntimeError(
-            "Exact VoxRoom agent cell {} is outside Active Room local window {}".format(
-                agent_cell.tolist(),
-                [gx1, gx2, gy1, gy2],
-            )
-        )
-    return local_navigation, local_agent_cell
+    info["voxroom_navigation_map_step"] = int(navigation["step"])
 
 
 class VoxRoomSidecarClient:
@@ -341,7 +278,7 @@ class VoxRoomSidecarClient:
         if simulator_step == self.last_simulator_step:
             if self.latest_navigation is None:
                 raise RuntimeError("VoxRoom sidecar lost its navigation projection")
-            apply_navigation_projection(info, self.latest_navigation)
+            attach_voxroom_projection(info, self.latest_navigation)
             return self.latest_response
         if simulator_step != self.last_simulator_step + 1:
             raise RuntimeError(
@@ -408,7 +345,7 @@ class VoxRoomSidecarClient:
                 else None
             ),
         )
-        apply_navigation_projection(info, navigation)
+        attach_voxroom_projection(info, navigation)
         frame_path.unlink()
         self.last_step = step
         self.last_simulator_step = simulator_step
