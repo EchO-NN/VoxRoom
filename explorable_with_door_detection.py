@@ -37,7 +37,7 @@ from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
 from time import perf_counter, time
 from visualization import RuntimeDashboard, TopologyEventRecorder
-from voxroom_sidecar import VoxRoomSidecarClient, local_navigation_projection
+from voxroom_sidecar import VoxRoomSidecarClient
 from run_context_contract import (
     STRICT_LIVE_FIGURE_DPI,
     STRICT_LIVE_FIGURE_SIZE_INCHES,
@@ -563,6 +563,7 @@ def main():
                 else int(voxroom_response["room_count"])
             ),
             "navigation_map_source": info.get("navigation_map_source"),
+            "navigation_planner_source": "active_room_original_fmm",
             "timestamp_unix": time(),
         }
         with progress_path.open("a", encoding="utf-8") as progress_file:
@@ -1075,13 +1076,6 @@ def main():
                 # gt_map = gt_map[:, ::-1]  # flip horizontally
                 gt_map_local_grid = np.rint(gt_map[gx1:gx2, gy1:gy2])
                 gt_exp_local_grid = np.rint(gt_exp[gx1:gx2, gy1:gy2])
-                (
-                    gt_free_local_grid,
-                    gt_navigation_start_local,
-                ) = local_navigation_projection(
-                    infos[0],
-                    (gx1, gx2, gy1, gy2),
-                )
                 gt_map = gt_map.transpose()
                 gt_exp = gt_exp.transpose()
                 # ---------------------------------------------
@@ -1091,9 +1085,6 @@ def main():
                     p_input['goal'] = goal
                     p_input['map_pred'] = gt_map_local_grid
                     p_input['exp_pred'] = gt_exp_local_grid
-                    if gt_free_local_grid is not None:
-                        p_input['navigation_free_pred'] = gt_free_local_grid
-                        p_input['navigation_start_pred'] = gt_navigation_start_local
                     p_input['pose_pred'] = planner_pose_inputs[0]
                     p_input['mid_out'] = True
                 path_list = []
@@ -1139,9 +1130,6 @@ def main():
                     p_input['goal'] = goal
                     p_input['map_pred'] = gt_map_local_grid
                     p_input['exp_pred'] = gt_exp_local_grid
-                    if gt_free_local_grid is not None:
-                        p_input['navigation_free_pred'] = gt_free_local_grid
-                        p_input['navigation_start_pred'] = gt_navigation_start_local
                     p_input['pose_pred'] = planner_pose_inputs[0]
                     p_input['mid_out'] = True
                 output = envs.get_short_term_goal(planner_inputs)
@@ -1268,14 +1256,6 @@ def main():
                 # gt_exp_local_grid = np.rint(gt_exp[gy1:gy2, gx1:gx2])
                 gt_map_local_grid = np.rint(gt_map[gx1:gx2, gy1:gy2])
                 gt_exp_local_grid = np.rint(gt_exp[gx1:gx2, gy1:gy2])
-                (
-                    gt_free_local_grid,
-                    gt_navigation_start_local,
-                ) = local_navigation_projection(
-                    infos[0],
-                    (gx1, gx2, gy1, gy2),
-                )
-
                 # plt.imshow(gt_map_local_grid.transpose())
                 # plt.plot(locs[1]*100/5, locs[0]*100/5, 'o', color = 'green')
                 # plt.show()
@@ -1314,9 +1294,6 @@ def main():
                         p_input['goal'] = goal
                         p_input['map_pred'] = gt_map_local_grid
                         p_input['exp_pred'] = gt_exp_local_grid
-                        if gt_free_local_grid is not None:
-                            p_input['navigation_free_pred'] = gt_free_local_grid
-                            p_input['navigation_start_pred'] = gt_navigation_start_local
                         p_input['pose_pred'] = planner_pose_inputs[0]
                         p_input['mid_out'] = True
                     loc_y = (planner_pose_inputs[0][0] - origins[0][0]) * 100 / 5
@@ -1351,9 +1328,6 @@ def main():
                             p_input['goal'] = goal
                             p_input['map_pred'] = gt_map_local_grid
                             p_input['exp_pred'] = gt_exp_local_grid
-                            if gt_free_local_grid is not None:
-                                p_input['navigation_free_pred'] = gt_free_local_grid
-                                p_input['navigation_start_pred'] = np.rint(stg).astype(np.int32)
                             p_input['pose_pred'] = planner_pose_inputs[0]
                             p_input['mid_out'] = True
                     # print(total_dist)
@@ -1639,9 +1613,6 @@ def main():
                         p_input['goal'] = final_goal
                         p_input['map_pred'] = gt_map_local_grid
                         p_input['exp_pred'] = gt_exp_local_grid
-                        if gt_free_local_grid is not None:
-                            p_input['navigation_free_pred'] = gt_free_local_grid
-                            p_input['navigation_start_pred'] = gt_navigation_start_local
                         p_input['pose_pred'] = planner_pose_inputs[0]
                         p_input['mid_out'] = True
                     output = envs.get_short_term_goal(planner_inputs_frontier)

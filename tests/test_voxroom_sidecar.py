@@ -20,6 +20,19 @@ from voxroom_sidecar import (
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
+    def test_voxroom_map_uses_original_active_room_navigation_pipeline(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        runtime_source = (
+            repository_root / "explorable_with_door_detection.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("navigation_free_pred", runtime_source)
+        self.assertNotIn("navigation_start_pred", runtime_source)
+        self.assertIn(
+            '"navigation_planner_source": "active_room_original_fmm"',
+            runtime_source,
+        )
+
     def test_start_cell_snaps_only_within_one_voxroom_cell(self):
         navigation_free = np.zeros((7, 7), dtype=bool)
         navigation_free[4, 4] = True
