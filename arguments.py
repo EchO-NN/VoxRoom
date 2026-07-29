@@ -186,7 +186,7 @@ def get_args():
         help='VoxRoom production YAML used by the sidecar worker',
     )
     parser.add_argument('--voxroom_map_size_m', type=float, default=48.0)
-    parser.add_argument('--voxroom_roomseg_every_steps', type=int, default=5)
+    parser.add_argument('--voxroom_roomseg_every_steps', type=int, default=50)
     parser.add_argument('--voxroom_visualization_every_steps', type=int, default=5)
     parser.add_argument('--voxroom_response_timeout_seconds', type=float, default=300.0)
 
