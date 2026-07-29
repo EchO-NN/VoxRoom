@@ -192,25 +192,30 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertEqual(labels[8, 9], 2)
         self.assertEqual(labels[0, 0], 0)
 
-    def test_dashboard_room_labels_use_same_transpose_as_active_maps(self):
+    def test_topology_room_labels_are_already_in_display_coordinates(self):
         explored_source = np.zeros((12, 12), dtype=np.float32)
         explored_source[1:4, 7:11] = 1.0
-        labels_source = np.zeros_like(explored_source, dtype=np.uint16)
-        labels_source[1:4, 7:11] = 1
         occupied_display = np.zeros_like(explored_source)
         explored_display = explored_source.transpose()
+        topology = Topomap_construction(map_size=12)
+        topology.g.vs[0]["room_exp"] = [
+            [row, column]
+            for row in range(7, 11)
+            for column in range(1, 4)
+        ]
+        room_labels = topology.room_label_map(explored_display.shape)
 
         with self.assertRaisesRegex(RuntimeError, "grossly misaligned"):
             RuntimeDashboard._validate_room_alignment(
                 occupied_display,
                 explored_display,
-                labels_source,
+                room_labels.transpose(),
             )
 
         RuntimeDashboard._validate_room_alignment(
             occupied_display,
             explored_display,
-            labels_source.transpose(),
+            room_labels,
         )
 
     def test_original_door_barrier_stays_on_the_detected_segment(self):

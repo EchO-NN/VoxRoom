@@ -848,9 +848,7 @@ def main():
             occupied = np.asarray(info["gt_map"]).transpose()
             explored = np.asarray(info["gt_exp"]).transpose()
             topology_snapshot = topo.snapshot()
-            room_labels = topo.room_label_map(
-                np.asarray(info["gt_map"]).shape
-            ).transpose()
+            room_labels = topo.room_label_map(occupied.shape)
             room_labels = dashboard.navigation_clipped_room_labels(
                 occupied,
                 explored,
