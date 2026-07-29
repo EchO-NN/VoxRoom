@@ -234,6 +234,24 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertFalse(np.any(partition[:, :8] == 2))
         self.assertFalse(np.any(partition[:, 11:] == 1))
 
+    def test_room_partition_rejects_non_door_voronoi_boundary(self):
+        occupied = np.zeros((12, 20), dtype=np.float32)
+        explored = np.ones_like(occupied)
+        labels = np.zeros_like(occupied, dtype=np.uint16)
+        labels[6, 3] = 1
+        labels[6, 16] = 2
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "door barriers do not separate room labels",
+        ):
+            RuntimeDashboard.navigation_partitioned_room_labels(
+                occupied,
+                explored,
+                labels,
+                [],
+            )
+
     def test_room_partition_never_colors_occupied_or_unexplored_cells(self):
         occupied = np.zeros((10, 12), dtype=np.float32)
         explored = np.zeros_like(occupied)

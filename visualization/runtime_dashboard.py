@@ -10,7 +10,6 @@ import numpy as np
 from matplotlib import patheffects
 from matplotlib.patches import Rectangle
 from PIL import Image
-from skimage.segmentation import watershed
 
 from run_context_contract import (
     STRICT_CAPTURE_MARKER_HEIGHT,
@@ -336,24 +335,42 @@ class RuntimeDashboard:
                 or not np.all(np.isfinite(end))
             ):
                 raise RuntimeError("Detected door endpoints are invalid")
+            door_vector = end - start
+            door_length = float(np.linalg.norm(door_vector))
+            if door_length < 1.0:
+                raise RuntimeError("Detected door line is shorter than one map cell")
+            door_direction = door_vector / door_length
+            extended_start = start - 6.0 * door_direction
+            extended_end = end + 6.0 * door_direction
             cv2.line(
                 door_barrier,
-                tuple(np.rint(start).astype(np.int32)),
-                tuple(np.rint(end).astype(np.int32)),
+                tuple(np.rint(extended_start).astype(np.int32)),
+                tuple(np.rint(extended_end).astype(np.int32)),
                 color=1,
-                thickness=3,
+                thickness=5,
             )
 
         partition_domain = navigation_free & (door_barrier == 0)
         seed_labels[~partition_domain] = 0
-        partition = watershed(
-            np.zeros(occupied_mask.shape, dtype=np.uint8),
-            markers=seed_labels,
-            connectivity=np.ones((3, 3), dtype=bool),
-            mask=partition_domain,
+        component_count, components = cv2.connectedComponents(
+            partition_domain.astype(np.uint8),
+            connectivity=8,
         )
-        partition = np.asarray(partition, dtype=np.uint16)
-        partition[~partition_domain] = 0
+        partition = np.zeros(occupied_mask.shape, dtype=np.uint16)
+        for component_id in range(1, int(component_count)):
+            component_mask = components == component_id
+            component_room_ids = np.unique(seed_labels[component_mask])
+            component_room_ids = component_room_ids[component_room_ids > 0]
+            if component_room_ids.size > 1:
+                raise RuntimeError(
+                    "Detected door barriers do not separate room labels {} "
+                    "in navigation component {}".format(
+                        component_room_ids.tolist(),
+                        component_id,
+                    )
+                )
+            if component_room_ids.size == 1:
+                partition[component_mask] = np.uint16(component_room_ids[0])
         return partition
 
     @staticmethod
