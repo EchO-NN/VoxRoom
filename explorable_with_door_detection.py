@@ -37,7 +37,7 @@ from env.habitat.hough_door_detection import convert_2_laser
 from detr_door_detection.run_detr import run_detr
 from time import perf_counter, time
 from visualization import RuntimeDashboard, TopologyEventRecorder
-from voxroom_sidecar import VoxRoomSidecarClient
+from voxroom_sidecar import VoxRoomSidecarClient, active_room_pose_from_voxroom
 from run_context_contract import (
     STRICT_LIVE_FIGURE_DPI,
     STRICT_LIVE_FIGURE_SIZE_INCHES,
@@ -564,6 +564,11 @@ def main():
             ),
             "navigation_map_source": info.get("navigation_map_source"),
             "navigation_planner_source": "active_room_original_fmm",
+            "navigation_pose_source": (
+                "voxroom_exact_world_axis_pose"
+                if voxroom_sidecar is not None
+                else "active_room_accumulated_pose"
+            ),
             "timestamp_unix": time(),
         }
         with progress_path.open("a", encoding="utf-8") as progress_file:
@@ -781,6 +786,14 @@ def main():
         init_map_and_pose()
         keep_exploring = True
         locs = np.array([args.map_size_cm / 100.0 / 4.0, args.map_size_cm / 100.0 / 4.0, 0])  # origins[0] [y,x,o]
+        if voxroom_sidecar is not None:
+            locs = (
+                active_room_pose_from_voxroom(
+                    infos[0],
+                    args.map_size_cm,
+                )
+                - origins[0]
+            )
         panoramic_obstacle_map = torch.zeros(num_scenes, 4, full_w, full_h).float().to(device)
         trajectory_xy = deque(maxlen=args.max_episode_length + 1)
 
@@ -806,10 +819,28 @@ def main():
             runtime_state["last_dashboard_absolute_locs"] = np.asarray(
                 absolute_locs
             ).copy()
-            agent_xy = (
-                float(absolute_locs[1] * 100.0 / args.map_resolution),
-                float(absolute_locs[0] * 100.0 / args.map_resolution),
-            )
+            heading_degrees = float(absolute_locs[2])
+            if voxroom_sidecar is not None:
+                exact_agent_cell = np.asarray(
+                    info["voxroom_navigation_agent_cell"],
+                    dtype=np.int64,
+                ).reshape(-1)
+                exact_base_pose = np.asarray(
+                    info["voxroom_base_pose_world_xyzyaw"],
+                    dtype=np.float64,
+                ).reshape(-1)
+                if exact_agent_cell.size != 2 or exact_base_pose.size != 4:
+                    raise RuntimeError("VoxRoom dashboard pose contract is invalid")
+                agent_xy = (
+                    float(exact_agent_cell[0]),
+                    float(exact_agent_cell[1]),
+                )
+                heading_degrees = float(np.degrees(exact_base_pose[3]))
+            else:
+                agent_xy = (
+                    float(absolute_locs[1] * 100.0 / args.map_resolution),
+                    float(absolute_locs[0] * 100.0 / args.map_resolution),
+                )
             if not trajectory_xy or np.linalg.norm(
                 np.asarray(agent_xy) - np.asarray(trajectory_xy[-1])
             ) > 0.05:
@@ -833,7 +864,7 @@ def main():
                 explored=explored,
                 room_labels=room_labels,
                 agent_xy=agent_xy,
-                heading_degrees=float(absolute_locs[2]),
+                heading_degrees=heading_degrees,
                 goal_xy=goal_xy,
                 doors=detected_door_list,
                 raw_doors=raw_detect_list,
@@ -1013,8 +1044,14 @@ def main():
                 # print(infos[0]['sensor_pose'])
                 # print(locs)
                 # locs = locs + infos[0]['sensor_pose']
-                locs = pu.get_new_pose(locs, infos[0]['sensor_pose'])
-                absolute_locs = locs + origins[0]
+                if voxroom_sidecar is not None:
+                    absolute_locs = active_room_pose_from_voxroom(
+                        infos[0],
+                        args.map_size_cm,
+                    )
+                else:
+                    locs = pu.get_new_pose(locs, infos[0]['sensor_pose'])
+                    absolute_locs = locs + origins[0]
                 long_term_goal.reverse()  # [y, x]
                 global_goal = np.array(long_term_goal) + origins[0][:2] * 100 / 5  # [y,x]
                 r, c = absolute_locs[1], absolute_locs[0]
@@ -1191,10 +1228,14 @@ def main():
                         return np.array([None]), np.array([None]), np.array([None]), False
                     # print(infos[0]['sensor_pose'])
                     # print(locs)
-                    locs = pu.get_new_pose(locs, infos[0]['sensor_pose'])
-
-
-                    absolute_locs = locs + origins[0]
+                    if voxroom_sidecar is not None:
+                        absolute_locs = active_room_pose_from_voxroom(
+                            infos[0],
+                            args.map_size_cm,
+                        )
+                    else:
+                        locs = pu.get_new_pose(locs, infos[0]['sensor_pose'])
+                        absolute_locs = locs + origins[0]
                     r, c = absolute_locs[1], absolute_locs[0]
                     loc_r, loc_c = [int(r * 100.0 / args.map_resolution),
                                     int(c * 100.0 / args.map_resolution)]

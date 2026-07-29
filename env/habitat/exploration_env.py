@@ -157,17 +157,27 @@ def habitat_depth_to_meters(depth, minimum_depth_m, maximum_depth_m, normalized)
     return values.astype(np.float32, copy=True)
 
 
+def habitat_rotation_yaw_in_voxroom(agent_rotation_habitat):
+    agent_rotation_h = quaternion.as_rotation_matrix(agent_rotation_habitat)
+    forward_h = (
+        agent_rotation_h
+        @ np.asarray([0.0, 0.0, -1.0], dtype=np.float64)
+    )
+    forward_v = HABITAT_WORLD_TO_VOXROOM @ forward_h
+    return math.atan2(
+        float(forward_v[1]),
+        float(forward_v[0]),
+    )
+
+
 def habitat_states_to_voxroom(agent_state, sensor_state, origin_habitat):
     origin = np.asarray(origin_habitat, dtype=np.float64).reshape(3)
     agent_position_h = np.asarray(agent_state.position, dtype=np.float64).reshape(3)
     sensor_position_h = np.asarray(sensor_state.position, dtype=np.float64).reshape(3)
-    agent_rotation_h = quaternion.as_rotation_matrix(agent_state.rotation)
     sensor_rotation_h = quaternion.as_rotation_matrix(sensor_state.rotation)
 
     base_position = HABITAT_WORLD_TO_VOXROOM @ (agent_position_h - origin)
-    forward_h = agent_rotation_h @ np.asarray([0.0, 0.0, -1.0], dtype=np.float64)
-    forward_v = HABITAT_WORLD_TO_VOXROOM @ forward_h
-    yaw = math.atan2(float(forward_v[1]), float(forward_v[0]))
+    yaw = habitat_rotation_yaw_in_voxroom(agent_state.rotation)
     base_pose = np.asarray(
         [base_position[0], base_position[1], base_position[2], yaw],
         dtype=np.float64,
@@ -345,8 +355,20 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         # Initialize map and pose
         self.map_size_cm = args.map_size_cm
         self.mapper.reset_map(self.map_size_cm)
-        self.curr_loc = [self.map_size_cm/100.0/2.0,
-                         self.map_size_cm/100.0/2.0, 0.]
+        initial_heading_degrees = (
+            math.degrees(
+                habitat_rotation_yaw_in_voxroom(
+                    self._env.sim.get_agent_state(0).rotation,
+                )
+            )
+            if self.voxroom_bridge_enabled
+            else 0.0
+        )
+        self.curr_loc = [
+            self.map_size_cm / 100.0 / 2.0,
+            self.map_size_cm / 100.0 / 2.0,
+            initial_heading_degrees,
+        ]
         self.curr_loc_gt = self.curr_loc
         self.last_loc_gt = self.curr_loc_gt
         self.last_loc = self.curr_loc
@@ -601,7 +623,9 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             ),
             "voxroom_base_pose_world_xyzyaw": base_pose,
             "voxroom_camera_transform_world": camera_transform,
-            "voxroom_geometry_contract": "habitat_exact_sensor_se3_to_voxroom_flu_v1",
+            "voxroom_geometry_contract": (
+                "habitat_world_axis_sensor_se3_to_voxroom_flu_v2"
+            ),
         }
 
     def get_reward_range(self):

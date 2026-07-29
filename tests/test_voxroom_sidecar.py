@@ -8,11 +8,13 @@ import quaternion
 
 from env.habitat.exploration_env import (
     habitat_depth_to_meters,
+    habitat_rotation_yaw_in_voxroom,
     habitat_states_to_voxroom,
     project_voxroom_goal_to_reachable_free,
     snap_voxroom_start_to_free,
 )
 from voxroom_sidecar import (
+    active_room_pose_from_voxroom,
     apply_navigation_projection,
     load_navigation_projection,
     local_navigation_projection,
@@ -28,6 +30,7 @@ class VoxRoomGeometryTests(unittest.TestCase):
 
         self.assertNotIn("navigation_free_pred", runtime_source)
         self.assertNotIn("navigation_start_pred", runtime_source)
+        self.assertNotIn("map_start_pred", runtime_source)
         self.assertIn(
             '"navigation_planner_source": "active_room_original_fmm"',
             runtime_source,
@@ -217,6 +220,34 @@ class VoxRoomGeometryTests(unittest.TestCase):
             atol=1.0e-8,
         )
         self.assertAlmostEqual(float(np.linalg.det(camera_transform[:3, :3])), 1.0)
+
+    def test_world_axis_heading_is_not_zeroed_at_episode_start(self):
+        rotation = quaternion.from_rotation_vector(
+            np.asarray([0.0, np.deg2rad(67.0), 0.0], dtype=np.float64)
+        )
+
+        yaw = habitat_rotation_yaw_in_voxroom(rotation)
+
+        self.assertAlmostEqual(yaw, np.deg2rad(67.0), places=7)
+
+    def test_voxroom_pose_is_centered_in_active_room_world_axis_map(self):
+        info = {
+            "voxroom_base_pose_world_xyzyaw": np.asarray(
+                [1.25, -2.5, 0.1, np.deg2rad(-133.0)],
+                dtype=np.float64,
+            ),
+        }
+
+        pose = active_room_pose_from_voxroom(
+            info,
+            map_size_cm=4800,
+        )
+
+        np.testing.assert_allclose(
+            pose,
+            [25.25, 21.5, -133.0],
+            atol=1.0e-8,
+        )
 
 
 if __name__ == "__main__":

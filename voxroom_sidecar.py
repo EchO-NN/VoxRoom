@@ -15,6 +15,7 @@ REQUIRED_INFO_KEYS = (
     "voxroom_intrinsics_width_height",
     "voxroom_base_pose_world_xyzyaw",
     "voxroom_camera_transform_world",
+    "voxroom_geometry_contract",
 )
 
 
@@ -202,6 +203,27 @@ def apply_navigation_projection(info, navigation):
     info["navigation_map_step"] = int(navigation["step"])
 
 
+def active_room_pose_from_voxroom(info, map_size_cm):
+    base_pose = np.asarray(
+        info["voxroom_base_pose_world_xyzyaw"],
+        dtype=np.float64,
+    ).reshape(-1)
+    if base_pose.size != 4 or not np.all(np.isfinite(base_pose)):
+        raise RuntimeError("VoxRoom base pose is invalid")
+    map_size_m = float(map_size_cm) / 100.0
+    if not np.isfinite(map_size_m) or map_size_m <= 0.0:
+        raise ValueError("Active Room map size must be positive")
+    center_m = 0.5 * map_size_m
+    return np.asarray(
+        [
+            center_m + float(base_pose[0]),
+            center_m + float(base_pose[1]),
+            float(np.degrees(base_pose[3])),
+        ],
+        dtype=np.float64,
+    )
+
+
 def local_navigation_projection(info, planning_window):
     if "voxroom_navigation_free" not in info:
         return None, None
@@ -331,6 +353,14 @@ class VoxRoomSidecarClient:
         missing = [key for key in REQUIRED_INFO_KEYS if key not in info]
         if missing:
             raise KeyError("Habitat info is missing VoxRoom fields: {}".format(missing))
+        if info["voxroom_geometry_contract"] != (
+            "habitat_world_axis_sensor_se3_to_voxroom_flu_v2"
+        ):
+            raise RuntimeError(
+                "Unexpected Habitat-to-VoxRoom geometry contract: {}".format(
+                    info["voxroom_geometry_contract"]
+                )
+            )
         if step != simulator_step:
             raise RuntimeError(
                 "Active Room action step {} differs from Habitat simulator step {}".format(
