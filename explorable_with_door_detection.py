@@ -855,6 +855,12 @@ def main():
                 explored,
                 room_labels,
             )
+            room_labels = dashboard.navigation_partitioned_room_labels(
+                occupied,
+                explored,
+                room_labels,
+                detected_door_list,
+            )
             explored_ratio = float(info.get("exp_ratio") or 0.0)
             explored_area = float(info.get("exp_reward") or 0.0) * 50.0
             dashboard.render(

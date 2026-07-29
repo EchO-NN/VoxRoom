@@ -5,10 +5,12 @@ import time
 from collections import Counter, deque
 from pathlib import Path
 
+import cv2
 import numpy as np
 from matplotlib import patheffects
 from matplotlib.patches import Rectangle
 from PIL import Image
+from skimage.segmentation import watershed
 
 from run_context_contract import (
     STRICT_CAPTURE_MARKER_HEIGHT,
@@ -291,6 +293,68 @@ class RuntimeDashboard:
         clipped = labels.copy()
         clipped[occupied | ~explored] = 0
         return clipped
+
+    @staticmethod
+    def navigation_partitioned_room_labels(
+        occupied,
+        explored,
+        room_labels,
+        doors,
+    ):
+        occupied_mask = np.asarray(occupied) > 0.5
+        explored_mask = np.asarray(explored) > 0.5
+        markers = np.asarray(room_labels)
+        if (
+            occupied_mask.ndim != 2
+            or explored_mask.shape != occupied_mask.shape
+            or markers.shape != occupied_mask.shape
+        ):
+            raise RuntimeError(
+                "Occupied, explored, and room-label maps must have one shape"
+            )
+        if not np.issubdtype(markers.dtype, np.integer):
+            raise TypeError("Room-label map must use an integer dtype")
+        if np.any(markers < 0):
+            raise RuntimeError("Room-label map contains negative labels")
+
+        navigation_free = explored_mask & ~occupied_mask
+        seed_labels = markers.astype(np.int32, copy=True)
+        seed_labels[~navigation_free] = 0
+        if not np.any(seed_labels):
+            return seed_labels.astype(np.uint16)
+
+        door_barrier = np.zeros(occupied_mask.shape, dtype=np.uint8)
+        for door in doors or []:
+            if not isinstance(door, dict):
+                raise TypeError("Detected door entries must be dictionaries")
+            start = np.asarray(door.get("start"), dtype=np.float64).reshape(-1)
+            end = np.asarray(door.get("end"), dtype=np.float64).reshape(-1)
+            if (
+                start.size != 2
+                or end.size != 2
+                or not np.all(np.isfinite(start))
+                or not np.all(np.isfinite(end))
+            ):
+                raise RuntimeError("Detected door endpoints are invalid")
+            cv2.line(
+                door_barrier,
+                tuple(np.rint(start).astype(np.int32)),
+                tuple(np.rint(end).astype(np.int32)),
+                color=1,
+                thickness=3,
+            )
+
+        partition_domain = navigation_free & (door_barrier == 0)
+        seed_labels[~partition_domain] = 0
+        partition = watershed(
+            np.zeros(occupied_mask.shape, dtype=np.uint8),
+            markers=seed_labels,
+            connectivity=np.ones((3, 3), dtype=bool),
+            mask=partition_domain,
+        )
+        partition = np.asarray(partition, dtype=np.uint16)
+        partition[~partition_domain] = 0
+        return partition
 
     @staticmethod
     def _node_positions(nodes):

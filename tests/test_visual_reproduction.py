@@ -212,6 +212,47 @@ class VisualReproductionTests(unittest.TestCase):
             labels_source.transpose(),
         )
 
+    def test_room_partition_fills_free_space_without_crossing_doors(self):
+        occupied = np.zeros((12, 20), dtype=np.float32)
+        explored = np.ones_like(occupied)
+        labels = np.zeros_like(occupied, dtype=np.uint16)
+        labels[5:8, 2:5] = 1
+        labels[5:8, 15:18] = 2
+        doors = [{"start": [9, 0], "end": [9, 11]}]
+
+        partition = RuntimeDashboard.navigation_partitioned_room_labels(
+            occupied,
+            explored,
+            labels,
+            doors,
+        )
+
+        self.assertEqual(partition.dtype, np.uint16)
+        self.assertEqual(partition[6, 1], 1)
+        self.assertEqual(partition[6, 18], 2)
+        self.assertEqual(partition[6, 9], 0)
+        self.assertFalse(np.any(partition[:, :8] == 2))
+        self.assertFalse(np.any(partition[:, 11:] == 1))
+
+    def test_room_partition_never_colors_occupied_or_unexplored_cells(self):
+        occupied = np.zeros((10, 12), dtype=np.float32)
+        explored = np.zeros_like(occupied)
+        explored[2:8, 2:10] = 1
+        occupied[4:6, 5:7] = 1
+        labels = np.zeros_like(occupied, dtype=np.uint16)
+        labels[3, 3] = 1
+
+        partition = RuntimeDashboard.navigation_partitioned_room_labels(
+            occupied,
+            explored,
+            labels,
+            [],
+        )
+
+        self.assertFalse(np.any(partition[occupied > 0.5]))
+        self.assertFalse(np.any(partition[explored <= 0.5]))
+        self.assertEqual(partition[7, 9], 1)
+
     def test_dashboard_clips_historical_room_labels_on_current_occupied(self):
         occupied = np.zeros((8, 9), dtype=np.float32)
         occupied[2, 6] = 1.0
