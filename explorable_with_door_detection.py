@@ -847,23 +847,22 @@ def main():
                 trajectory_xy.append(agent_xy)
             occupied = np.asarray(info["gt_map"]).transpose()
             explored = np.asarray(info["gt_exp"]).transpose()
-            room_labels = topo.room_label_map(
-                np.asarray(info["gt_map"]).shape
-            ).transpose()
+            topology_snapshot = topo.snapshot()
+            room_labels = dashboard.topology_room_seed_labels(
+                occupied.shape,
+                topology_snapshot,
+                agent_xy,
+            )
             room_labels = dashboard.navigation_clipped_room_labels(
                 occupied,
                 explored,
                 room_labels,
             )
-            display_doors = dashboard.transposed_door_segments(
-                detected_door_list
-            )
-            display_raw_doors = dashboard.transposed_xy_points(raw_detect_list)
             room_labels = dashboard.navigation_partitioned_room_labels(
                 occupied,
                 explored,
                 room_labels,
-                display_doors,
+                detected_door_list,
             )
             explored_ratio = float(info.get("exp_ratio") or 0.0)
             explored_area = float(info.get("exp_reward") or 0.0) * 50.0
@@ -876,11 +875,11 @@ def main():
                 agent_xy=agent_xy,
                 heading_degrees=heading_degrees,
                 goal_xy=goal_xy,
-                doors=display_doors,
-                raw_doors=display_raw_doors,
+                doors=detected_door_list,
+                raw_doors=raw_detect_list,
                 frontiers=frontiers or [],
                 trajectory_xy=list(trajectory_xy),
-                topology_snapshot=topo.snapshot(),
+                topology_snapshot=topology_snapshot,
                 coverage_history=list(cov_ratio_list),
                 explored_ratio=explored_ratio,
                 explored_area=explored_area,

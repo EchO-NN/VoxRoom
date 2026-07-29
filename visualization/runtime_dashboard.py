@@ -294,40 +294,43 @@ class RuntimeDashboard:
         return clipped
 
     @staticmethod
-    def transposed_door_segments(doors):
-        transposed = []
-        for door in doors or []:
-            if not isinstance(door, dict):
-                raise TypeError("Detected door entries must be dictionaries")
-            start = np.asarray(door.get("start"), dtype=np.float64).reshape(-1)
-            end = np.asarray(door.get("end"), dtype=np.float64).reshape(-1)
-            if (
-                start.size != 2
-                or end.size != 2
-                or not np.all(np.isfinite(start))
-                or not np.all(np.isfinite(end))
-            ):
-                raise RuntimeError("Detected door endpoints are invalid")
-            transposed.append(
-                {
-                    "start": [float(start[1]), float(start[0])],
-                    "end": [float(end[1]), float(end[0])],
-                }
-            )
-        return transposed
+    def topology_room_seed_labels(shape, topology_snapshot, agent_xy):
+        if len(shape) != 2:
+            raise ValueError("Room seed map requires a two-dimensional shape")
+        height, width = (int(shape[0]), int(shape[1]))
+        if height <= 0 or width <= 0:
+            raise ValueError("Room seed map dimensions must be positive")
+        nodes = topology_snapshot.get("nodes")
+        current_node_id = topology_snapshot.get("current_node_id")
+        if not isinstance(nodes, list) or current_node_id is None:
+            raise RuntimeError("Topology snapshot is missing room seed state")
 
-    @staticmethod
-    def transposed_xy_points(points):
-        if not points:
-            return []
-        coordinates = np.asarray(points, dtype=np.float64)
-        if (
-            coordinates.ndim != 2
-            or coordinates.shape[1] < 2
-            or not np.all(np.isfinite(coordinates[:, :2]))
-        ):
-            raise RuntimeError("Map point coordinates are invalid")
-        return coordinates[:, [1, 0]].tolist()
+        labels = np.zeros((height, width), dtype=np.uint16)
+        for node in nodes:
+            node_id = int(node["id"])
+            entries = node.get("room_entries") or []
+            seeds = list(entries)
+            if not seeds and node_id == int(current_node_id):
+                seeds = [agent_xy]
+            for seed in seeds:
+                coordinate = np.asarray(seed, dtype=np.float64).reshape(-1)
+                if coordinate.size != 2 or not np.all(np.isfinite(coordinate)):
+                    raise RuntimeError("Topology room seed coordinate is invalid")
+                column, row = np.rint(coordinate).astype(np.int64)
+                if not (0 <= row < height and 0 <= column < width):
+                    raise RuntimeError(
+                        "Topology room seed {} is outside the display map".format(
+                            coordinate.tolist()
+                        )
+                    )
+                existing = int(labels[row, column])
+                room_label = node_id + 1
+                if existing not in (0, room_label):
+                    raise RuntimeError(
+                        "Topology rooms share one display seed cell"
+                    )
+                labels[row, column] = np.uint16(room_label)
+        return labels
 
     @staticmethod
     def navigation_partitioned_room_labels(
@@ -359,9 +362,8 @@ class RuntimeDashboard:
             return seed_labels.astype(np.uint16)
 
         door_barrier = np.zeros(occupied_mask.shape, dtype=np.uint8)
-        door_cuts = RuntimeDashboard.navigation_door_cut_segments(
-            occupied_mask,
-            explored_mask,
+        door_cuts = RuntimeDashboard.navigation_door_partition_lines(
+            occupied_mask.shape,
             doors,
         )
         for extended_start, extended_end in door_cuts:
@@ -386,7 +388,7 @@ class RuntimeDashboard:
             component_room_ids = component_room_ids[component_room_ids > 0]
             if component_room_ids.size > 1:
                 raise RuntimeError(
-                    "Detected door cuts do not separate room labels {} "
+                    "Detected door partition lines do not separate room labels {} "
                     "in navigation component {}".format(
                         component_room_ids.tolist(),
                         component_id,
@@ -397,36 +399,13 @@ class RuntimeDashboard:
         return partition
 
     @staticmethod
-    def navigation_door_cut_segments(occupied, explored, doors):
-        occupied_mask = np.asarray(occupied) > 0.5
-        explored_mask = np.asarray(explored) > 0.5
-        if occupied_mask.ndim != 2 or explored_mask.shape != occupied_mask.shape:
-            raise RuntimeError(
-                "Occupied and explored maps must have one two-dimensional shape"
-            )
-        height, width = occupied_mask.shape
-        blocking = occupied_mask | ~explored_mask
-        max_extension = int(np.ceil(np.hypot(height, width))) + 2
+    def navigation_door_partition_lines(shape, doors):
+        if len(shape) != 2:
+            raise ValueError("Door partition map requires a two-dimensional shape")
+        height, width = (int(shape[0]), int(shape[1]))
+        if height <= 0 or width <= 0:
+            raise ValueError("Door partition map dimensions must be positive")
         cuts = []
-
-        def extend_to_blocker(anchor, direction):
-            last = np.asarray(anchor, dtype=np.float64).copy()
-            for distance in range(1, max_extension + 1):
-                candidate = anchor + float(distance) * direction
-                column, row = np.rint(candidate).astype(np.int64)
-                if not (0 <= row < height and 0 <= column < width):
-                    return np.asarray(
-                        [
-                            np.clip(column, 0, width - 1),
-                            np.clip(row, 0, height - 1),
-                        ],
-                        dtype=np.float64,
-                    )
-                last = candidate
-                if blocking[row, column]:
-                    return last
-            raise RuntimeError("Door cut did not reach a map blocker")
-
         for door in doors or []:
             if not isinstance(door, dict):
                 raise TypeError("Detected door entries must be dictionaries")
@@ -444,12 +423,37 @@ class RuntimeDashboard:
             if door_length < 1.0:
                 raise RuntimeError("Detected door line is shorter than one map cell")
             door_direction = door_vector / door_length
-            cuts.append(
-                (
-                    extend_to_blocker(start, -door_direction),
-                    extend_to_blocker(end, door_direction),
-                )
-            )
+            midpoint = 0.5 * (start + end)
+            intersections = []
+            if abs(float(door_direction[0])) > 1.0e-9:
+                for column in (0.0, float(width - 1)):
+                    distance = (column - midpoint[0]) / door_direction[0]
+                    row = midpoint[1] + distance * door_direction[1]
+                    if -1.0e-6 <= row <= float(height - 1) + 1.0e-6:
+                        intersections.append(
+                            (float(distance), np.asarray([column, row]))
+                        )
+            if abs(float(door_direction[1])) > 1.0e-9:
+                for row in (0.0, float(height - 1)):
+                    distance = (row - midpoint[1]) / door_direction[1]
+                    column = midpoint[0] + distance * door_direction[0]
+                    if -1.0e-6 <= column <= float(width - 1) + 1.0e-6:
+                        intersections.append(
+                            (float(distance), np.asarray([column, row]))
+                        )
+            intersections.sort(key=lambda item: item[0])
+            unique_points = []
+            for _, point in intersections:
+                if not unique_points or not np.allclose(
+                    point,
+                    unique_points[-1],
+                    atol=1.0e-6,
+                    rtol=0.0,
+                ):
+                    unique_points.append(point)
+            if len(unique_points) < 2:
+                raise RuntimeError("Detected door line does not cross the map")
+            cuts.append((unique_points[0], unique_points[-1]))
         return cuts
 
     @staticmethod
@@ -582,11 +586,11 @@ class RuntimeDashboard:
                 linewidth=1.2,
                 alpha=0.8,
             )
-        for start, end in self.navigation_door_cut_segments(
-            occupied,
-            explored,
-            doors,
-        ):
+        for door in doors:
+            start = door.get("start")
+            end = door.get("end")
+            if start is None or end is None:
+                continue
             axis.plot(
                 [start[0], end[0]],
                 [start[1], end[1]],

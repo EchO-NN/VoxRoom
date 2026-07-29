@@ -234,25 +234,25 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertFalse(np.any(partition[:, :8] == 2))
         self.assertFalse(np.any(partition[:, 11:] == 1))
 
-    def test_dashboard_transposes_door_and_raw_point_coordinates(self):
-        doors = [
-            {
-                "start": [470, 469],
-                "end": [485, 469],
-                "mid": [477, 469],
-            }
-        ]
+    def test_dashboard_uses_topology_waypoints_as_room_seeds(self):
+        snapshot = {
+            "current_node_id": 1,
+            "nodes": [
+                {"id": 0, "room_entries": [[7, 5]]},
+                {"id": 1, "room_entries": [[12, 5]]},
+                {"id": 2, "room_entries": []},
+            ],
+        }
 
-        display_doors = RuntimeDashboard.transposed_door_segments(doors)
-        display_points = RuntimeDashboard.transposed_xy_points(
-            [[470, 469], [485, 469]]
+        labels = RuntimeDashboard.topology_room_seed_labels(
+            (16, 20),
+            snapshot,
+            (15, 11),
         )
 
-        self.assertEqual(
-            display_doors,
-            [{"start": [469.0, 470.0], "end": [469.0, 485.0]}],
-        )
-        self.assertEqual(display_points, [[469.0, 470.0], [469.0, 485.0]])
+        self.assertEqual(labels[5, 7], 1)
+        self.assertEqual(labels[5, 12], 2)
+        self.assertEqual(np.count_nonzero(labels == 3), 0)
 
     def test_room_partition_rejects_non_door_voronoi_boundary(self):
         occupied = np.zeros((12, 20), dtype=np.float32)
@@ -263,7 +263,7 @@ class VisualReproductionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "door cuts do not separate room labels",
+            "door partition lines do not separate room labels",
         ):
             RuntimeDashboard.navigation_partitioned_room_labels(
                 occupied,
@@ -272,22 +272,21 @@ class VisualReproductionTests(unittest.TestCase):
                 [],
             )
 
-    def test_door_cut_extends_to_the_displayed_navigation_boundary(self):
+    def test_door_partition_line_extends_to_the_map_boundary(self):
         occupied = np.zeros((14, 22), dtype=np.float32)
         explored = np.zeros_like(occupied)
         explored[2:12, 2:20] = 1
         door = {"start": [10, 6], "end": [10, 8]}
 
-        cuts = RuntimeDashboard.navigation_door_cut_segments(
-            occupied,
-            explored,
+        cuts = RuntimeDashboard.navigation_door_partition_lines(
+            occupied.shape,
             [door],
         )
 
         self.assertEqual(len(cuts), 1)
         start, end = cuts[0]
-        np.testing.assert_allclose(start, [10, 1])
-        np.testing.assert_allclose(end, [10, 12])
+        np.testing.assert_allclose(start, [10, 0])
+        np.testing.assert_allclose(end, [10, 13])
 
     def test_room_partition_never_colors_occupied_or_unexplored_cells(self):
         occupied = np.zeros((10, 12), dtype=np.float32)
