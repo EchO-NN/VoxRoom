@@ -29,12 +29,6 @@ from run_context_contract import (
     episode_contract_sha256,
     strict_capture_marker_bits,
 )
-from topology_contract import (
-    crossing_evidence_survives,
-    surviving_crossing_count,
-)
-
-
 EXPECTED_GIBSON_CONTEXT = {
     "source": "official_gibson_habitat_trainval",
     "archive_sha256": (
@@ -663,13 +657,13 @@ def main():
         raise RuntimeError("Surviving door crossing count mismatch")
     if strict_topology:
         if topology.get("transition_count", 0) < 1:
-            raise RuntimeError("No room transition was confirmed")
-        if topology.get("door_crossing_count", 0) < 1:
-            raise RuntimeError("No door crossing was confirmed")
-        if topology.get("status") != "cross_room_verified":
-            raise RuntimeError("Topology status is not cross_room_verified")
+            raise RuntimeError("No upstream-source room transition was recorded")
+        if topology.get("status") != "cross_room_source_semantics":
+            raise RuntimeError(
+                "Topology status is not cross_room_source_semantics"
+            )
         if not topology.get("requirement_met"):
-            raise RuntimeError("Strict topology requirement was not met")
+            raise RuntimeError("Upstream-source topology requirement was not met")
 
     progress = [
         json.loads(line)
@@ -888,78 +882,40 @@ def main():
     if early_completion and int(topology_completion_event["step"]) != executed_steps:
         raise RuntimeError("Early-completion topology event has the wrong step")
     if strict_topology:
-        crossing_events = [
-            event
-            for event in topology_events
-            if event.get("event_type") == "door_crossing_confirmed"
-        ]
-        if not crossing_events or any(
-            event.get("payload", {}).get("method") != "trajectory_geometry"
-            for event in crossing_events
-        ):
-            raise RuntimeError(
-                "Door crossing was not confirmed by trajectory geometry"
-            )
-        for event in crossing_events:
-            segments = (
-                event.get("payload", {})
-                .get("evidence", {})
-                .get("segments", [])
-            )
-            if not segments or any(
-                not segment.get("confirmed") for segment in segments
-            ):
-                raise RuntimeError(
-                    "Door crossing geometry contains an unconfirmed segment"
-                )
         transition_events = [
             event
             for event in topology_events
-            if event.get("event_type") == "room_transition_confirmed"
+            if event.get("event_type") == "room_transition_advanced"
         ]
-        if not transition_events or any(
-            event.get("payload", {}).get("confirmation_method")
-            != "trajectory_geometry"
-            for event in transition_events
-        ):
-            raise RuntimeError(
-                "Room transition lacks trajectory geometry confirmation"
-            )
-        crossing_evidence = [
-            event["payload"]["evidence"]
-            for event in crossing_events
-        ]
-        observed_surviving_crossings = surviving_crossing_count(
-            crossing_evidence,
-            snapshot,
-        )
         if (
-            observed_surviving_crossings < 1
-            or topology.get("surviving_door_crossing_count")
-            != observed_surviving_crossings
-            or result.get("surviving_door_crossing_count")
-            != observed_surviving_crossings
+            len(transition_events) != topology.get("transition_count")
+            or any(
+                event.get("payload", {}).get("transition_method")
+                != "upstream_source_semantics"
+                for event in transition_events
+            )
         ):
             raise RuntimeError(
-                "No confirmed door crossing survives in the final topology"
+                "Room transitions do not match upstream source semantics"
             )
-        surviving_events = [
-            event
-            for event in crossing_events
-            if crossing_evidence_survives(
-                event["payload"]["evidence"],
-                snapshot,
-            )
-        ]
-        if not any(
-            transition.get("step") == crossing.get("step")
-            and transition.get("payload", {}).get("evidence")
-            == crossing.get("payload", {}).get("evidence")
-            for crossing in surviving_events
-            for transition in transition_events
-        ):
+        forbidden_transition_events = {
+            "door_crossing_confirmed",
+            "door_crossing_geometry_rejected",
+            "room_transition_confirmed",
+            "room_transition_not_confirmed",
+        }
+        observed_forbidden_events = sorted(
+            {
+                event.get("event_type")
+                for event in topology_events
+                if event.get("event_type") in forbidden_transition_events
+            }
+        )
+        if observed_forbidden_events:
             raise RuntimeError(
-                "No surviving crossing has a matching room transition"
+                "Non-source transition checks are active: {}".format(
+                    observed_forbidden_events
+                )
             )
 
     image_sizes = {

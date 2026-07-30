@@ -27,7 +27,6 @@ class Topomap_construction():
         )
         self.bot_near_range = 30
         self.event_callback = event_callback
-        self.pending_transition = None
         self._emit("topology_initialized", snapshot=self.snapshot())
 
     @staticmethod
@@ -90,21 +89,6 @@ class Topomap_construction():
         self._validate_stable_ids()
         return added_vertex_ids
 
-    def _node_index_for_stable_id(self, stable_id):
-        self._validate_stable_ids()
-        matches = [
-            vertex.index
-            for vertex in self.g.vs
-            if int(vertex["stable_id"]) == int(stable_id)
-        ]
-        if len(matches) != 1:
-            raise RuntimeError(
-                "Topology node stable ID {} does not resolve uniquely".format(
-                    stable_id
-                )
-            )
-        return matches[0]
-
     def _add_edge(self, source, target):
         self._validate_stable_ids()
         self.g.add_edge(source, target)
@@ -149,7 +133,6 @@ class Topomap_construction():
             "edge_count": self.g.ecount(),
             "nodes": nodes,
             "edges": edges,
-            "pending_transition": self._plain(self.pending_transition),
         }
 
     def room_label_map(self, shape):
@@ -630,7 +613,6 @@ class Topomap_construction():
     def choose_door(self, current_location):  # current_location is [y,x], global frame unit is pix
         previous_node_id = self.current_node_id
         current_location = list(reversed(current_location))
-        selected_edge_path = []
         # first check directly connected vertices
         connected_list = self.g.incident(self.current_node_id, mode='out')
         min_distance = 10000
@@ -696,10 +678,9 @@ class Topomap_construction():
             """
             if goal_node_idx is not None:
                 shortest_path = self.g.get_shortest_paths(self.current_node_id, to=goal_node_idx, mode='out', output='epath')
-                selected_edge_path = list(shortest_path[0])
                 #print('goal_idx {}'.format(goal_node_idx))
                 #print('spath {}'.format(shortest_path))
-                for route in selected_edge_path:
+                for route in shortest_path[0]:
                     goal.append(self.g.es[route]['way_point'])
                 self.g.vs[self.current_node_id]['room_status'] = 'explored'
                 self.current_node_id = goal_node_idx
@@ -708,195 +689,29 @@ class Topomap_construction():
                 no_exp = True
         else:
             # update the graph information
-            selected_edge_path = [goal_edge_idx]
             self.g.vs[self.current_node_id]['room_status'] = 'explored'
             self.current_node_id = self.get_connected_v(goal_edge_idx, self.current_node_id)
             self.g.vs[self.current_node_id]['room_status'] = 'exploring'
 
         if no_exp:
             goal = []
-            self.pending_transition = None
             self.g.vs[self.current_node_id]['room_status'] = 'explored'
 
         if goal:
-            segments = [
-                self._transition_segment(edge_idx)
-                for edge_idx in selected_edge_path
-            ]
-            self.pending_transition = {
-                "source_node_id": int(previous_node_id),
-                "target_node_id": int(self.current_node_id),
-                "source_node_stable_id": int(
-                    self.g.vs[previous_node_id]["stable_id"]
-                ),
-                "target_node_stable_id": int(
-                    self.g.vs[self.current_node_id]["stable_id"]
-                ),
-                "selected_from_xy": self._plain(current_location),
-                "segments": segments,
-            }
             self._emit(
                 "topology_exit_selected",
                 source_node_id=previous_node_id,
                 target_node_id=self.current_node_id,
                 waypoints=goal,
-                transition=self.pending_transition,
                 snapshot=self.snapshot(),
             )
         else:
-            self.pending_transition = None
             self._emit(
                 "topology_no_exit_available",
                 current_node_id=self.current_node_id,
                 snapshot=self.snapshot(),
             )
         return goal  # goal is list of [x,y] global frame unit is pix
-
-    def _transition_segment(self, edge_idx):
-        self._validate_stable_ids()
-        source_node_id, target_node_id = self.g.es[edge_idx].tuple
-        source_waypoint = None
-        for reverse_edge_idx in self.g.incident(target_node_id, mode='out'):
-            reverse_source, reverse_target = self.g.es[reverse_edge_idx].tuple
-            if (
-                reverse_source == target_node_id
-                and reverse_target == source_node_id
-            ):
-                source_waypoint = self.g.es[reverse_edge_idx]["way_point"]
-                break
-        return {
-            "edge_id": int(edge_idx),
-            "edge_stable_id": int(self.g.es[edge_idx]["stable_id"]),
-            "source_node_id": int(source_node_id),
-            "target_node_id": int(target_node_id),
-            "source_node_stable_id": int(
-                self.g.vs[source_node_id]["stable_id"]
-            ),
-            "target_node_stable_id": int(
-                self.g.vs[target_node_id]["stable_id"]
-            ),
-            "source_waypoint": self._plain(source_waypoint),
-            "target_waypoint": self._plain(
-                self.g.es[edge_idx]["way_point"]
-            ),
-        }
-
-    def confirm_pending_transition(
-        self,
-        trajectory_segments,
-        reached_exit_count,
-        endpoint_tolerance=6.0,
-        side_margin=1.0,
-    ):
-        pending = self.pending_transition
-        if pending is None:
-            return False, {"reason": "no_pending_transition"}
-
-        planned_segments = pending["segments"]
-        evidence = {
-            "source_node_id": pending["source_node_id"],
-            "target_node_id": pending["target_node_id"],
-            "source_node_stable_id": pending["source_node_stable_id"],
-            "target_node_stable_id": pending["target_node_stable_id"],
-            "planned_segment_count": len(planned_segments),
-            "reached_exit_count": int(reached_exit_count),
-            "segments": [],
-        }
-        all_segments_confirmed = (
-            len(planned_segments) > 0
-            and int(reached_exit_count) == len(planned_segments)
-            and len(trajectory_segments) == len(planned_segments)
-        )
-        for segment_index, planned in enumerate(planned_segments):
-            segment_evidence = {
-                "edge_id": planned["edge_id"],
-                "edge_stable_id": planned["edge_stable_id"],
-                "source_node_id": planned["source_node_id"],
-                "target_node_id": planned["target_node_id"],
-                "source_node_stable_id": planned["source_node_stable_id"],
-                "target_node_stable_id": planned["target_node_stable_id"],
-                "source_waypoint": planned["source_waypoint"],
-                "target_waypoint": planned["target_waypoint"],
-                "confirmed": False,
-            }
-            if (
-                planned["source_waypoint"] is None
-                or segment_index >= len(trajectory_segments)
-                or not trajectory_segments[segment_index]
-            ):
-                segment_evidence["reason"] = "missing_geometry_or_trajectory"
-                evidence["segments"].append(segment_evidence)
-                all_segments_confirmed = False
-                continue
-
-            trace = np.asarray(
-                trajectory_segments[segment_index],
-                dtype=np.float64,
-            )
-            source = np.asarray(planned["source_waypoint"], dtype=np.float64)
-            target = np.asarray(planned["target_waypoint"], dtype=np.float64)
-            direction = target - source
-            separation = float(np.linalg.norm(direction))
-            if trace.ndim != 2 or trace.shape[1] != 2 or separation <= 0:
-                segment_evidence["reason"] = "invalid_geometry_or_trajectory"
-                evidence["segments"].append(segment_evidence)
-                all_segments_confirmed = False
-                continue
-
-            axis = direction / separation
-            midpoint = (source + target) / 2.0
-            signed_positions = np.dot(trace - midpoint, axis)
-            endpoint_distance = float(np.linalg.norm(trace[-1] - target))
-            source_side_distance = float(np.min(signed_positions))
-            target_side_distance = float(np.max(signed_positions))
-            segment_confirmed = (
-                source_side_distance <= -float(side_margin)
-                and target_side_distance >= float(side_margin)
-                and endpoint_distance <= float(endpoint_tolerance)
-            )
-            segment_evidence.update(
-                {
-                    "trajectory_point_count": int(trace.shape[0]),
-                    "trajectory_start": trace[0].tolist(),
-                    "trajectory_end": trace[-1].tolist(),
-                    "waypoint_separation": separation,
-                    "source_side_distance": source_side_distance,
-                    "target_side_distance": target_side_distance,
-                    "endpoint_distance": endpoint_distance,
-                    "endpoint_tolerance": float(endpoint_tolerance),
-                    "side_margin": float(side_margin),
-                    "confirmed": bool(segment_confirmed),
-                }
-            )
-            evidence["segments"].append(segment_evidence)
-            all_segments_confirmed = (
-                all_segments_confirmed and segment_confirmed
-            )
-
-        if all_segments_confirmed:
-            self._emit(
-                "door_crossing_confirmed",
-                method="trajectory_geometry",
-                evidence=evidence,
-                snapshot=self.snapshot(),
-            )
-        else:
-            source_node_id = self._node_index_for_stable_id(
-                pending["source_node_stable_id"]
-            )
-            target_node_id = self._node_index_for_stable_id(
-                pending["target_node_stable_id"]
-            )
-            self.g.vs[target_node_id]["room_status"] = "unexplored"
-            self.current_node_id = source_node_id
-            self.g.vs[source_node_id]["room_status"] = "exploring"
-            self._emit(
-                "door_crossing_geometry_rejected",
-                evidence=evidence,
-                snapshot=self.snapshot(),
-            )
-        self.pending_transition = None
-        return bool(all_segments_confirmed), evidence
 
     def get_connected_v(self, edge_idx, start_node_idx):
         """

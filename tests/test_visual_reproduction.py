@@ -60,7 +60,7 @@ class VisualReproductionTests(unittest.TestCase):
         self.assertIn("topology_no_exit_available", events)
         self.assertNotIn("door_crossing_confirmed", events)
 
-    def test_transition_requires_a_complete_source_to_target_trajectory(self):
+    def test_exit_selection_uses_upstream_optimistic_room_advance(self):
         events = []
         topology = Topomap_construction(
             map_size=32,
@@ -79,88 +79,27 @@ class VisualReproductionTests(unittest.TestCase):
         topology.v_num = topology.g.vcount()
 
         self.assertEqual(topology.choose_door([10, 10]), [[20, 10]])
-        confirmed, evidence = topology.confirm_pending_transition(
-            [[[10, 10], [14, 10], [16, 10], [20, 10]]],
-            reached_exit_count=1,
-        )
-
-        self.assertTrue(confirmed)
-        self.assertTrue(evidence["segments"][0]["confirmed"])
         self.assertEqual(topology.current_node_id, 1)
-        confirmed_events = [
+        self.assertEqual(topology.g.vs[0]["room_status"], "explored")
+        self.assertEqual(topology.g.vs[1]["room_status"], "exploring")
+        self.assertNotIn("pending_transition", topology.snapshot())
+        selected_events = [
             payload
             for event_type, payload in events
-            if event_type == "door_crossing_confirmed"
+            if event_type == "topology_exit_selected"
         ]
-        self.assertEqual(len(confirmed_events), 1)
-        self.assertEqual(
-            confirmed_events[0]["method"],
-            "trajectory_geometry",
+        self.assertEqual(len(selected_events), 1)
+        self.assertEqual(selected_events[0]["source_node_id"], 0)
+        self.assertEqual(selected_events[0]["target_node_id"], 1)
+        self.assertNotIn("transition", selected_events[0])
+        self.assertFalse(hasattr(topology, "confirm_pending_transition"))
+        self.assertFalse(
+            {
+                "door_crossing_confirmed",
+                "door_crossing_geometry_rejected",
+            }
+            & {event_type for event_type, _ in events}
         )
-
-    def test_transition_rejects_target_only_trace_and_restores_source_room(self):
-        events = []
-        topology = Topomap_construction(
-            map_size=32,
-            event_callback=lambda event_type, payload: events.append(
-                event_type
-            ),
-        )
-        topology._add_rooms(1)
-        topology.g.vs[1]["room_status"] = "unexplored"
-        topology.g.vs[1]["room_entry"] = [[20, 10]]
-        topology.g.vs[1]["room_exp"] = []
-        topology._add_edge(0, 1)
-        topology._add_edge(1, 0)
-        topology.g.es[0]["way_point"] = [20, 10]
-        topology.g.es[1]["way_point"] = [10, 10]
-        topology.v_num = topology.g.vcount()
-
-        topology.choose_door([10, 10])
-        confirmed, evidence = topology.confirm_pending_transition(
-            [[[16, 10], [20, 10]]],
-            reached_exit_count=1,
-        )
-
-        self.assertFalse(confirmed)
-        self.assertFalse(evidence["segments"][0]["confirmed"])
-        self.assertEqual(topology.current_node_id, 0)
-        self.assertEqual(topology.g.vs[0]["room_status"], "exploring")
-        self.assertEqual(topology.g.vs[1]["room_status"], "unexplored")
-        self.assertIn("door_crossing_geometry_rejected", events)
-        self.assertNotIn("door_crossing_confirmed", events)
-
-    def test_transition_rejection_resolves_rooms_by_stable_id(self):
-        topology = Topomap_construction(map_size=32)
-        topology._add_rooms(2)
-        topology.g.vs[0]["room_status"] = "explored"
-        topology.g.vs[1]["room_status"] = "exploring"
-        topology.g.vs[1]["room_entry"] = [[10, 10]]
-        topology.g.vs[1]["room_exp"] = []
-        topology.g.vs[2]["room_status"] = "unexplored"
-        topology.g.vs[2]["room_entry"] = [[20, 10]]
-        topology.g.vs[2]["room_exp"] = []
-        topology._add_edge(1, 2)
-        topology._add_edge(2, 1)
-        topology.g.es[0]["way_point"] = [20, 10]
-        topology.g.es[1]["way_point"] = [10, 10]
-        topology.current_node_id = 1
-        topology.v_num = topology.g.vcount()
-
-        topology.choose_door([10, 10])
-        topology.g.delete_vertices(0)
-        topology.v_num = topology.g.vcount()
-        confirmed, _ = topology.confirm_pending_transition(
-            [[[16, 10], [20, 10]]],
-            reached_exit_count=1,
-        )
-
-        self.assertFalse(confirmed)
-        self.assertEqual(topology.current_node_id, 0)
-        self.assertEqual(topology.g.vs[0]["stable_id"], 1)
-        self.assertEqual(topology.g.vs[0]["room_status"], "exploring")
-        self.assertEqual(topology.g.vs[1]["stable_id"], 2)
-        self.assertEqual(topology.g.vs[1]["room_status"], "unexplored")
 
     def test_missing_stable_id_fails_instead_of_being_backfilled(self):
         topology = Topomap_construction(map_size=32)
