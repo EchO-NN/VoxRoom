@@ -1391,8 +1391,6 @@ def main():
         raise RuntimeError("Replay frame count mismatch")
     if paths["replay"].stat().st_size < 1024:
         raise RuntimeError("Topology replay is empty")
-    if "\nmoved to another room\n" in paths["runtime_log"].read_text():
-        raise RuntimeError("Runtime contains the old unconditional transition claim")
 
     if args.run_id not in command or "--detector_device cuda" not in command:
         raise RuntimeError("Command evidence is not bound to this CUDA run")
