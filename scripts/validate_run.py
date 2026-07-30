@@ -1562,10 +1562,16 @@ def main():
         "artifact_closure_sha256": artifact_closure_sha256,
         "strict_guard_violations": 0,
         "fail_fast_sources": checked_fail_fast_sources,
-        "crossing_evidence": (
-            crossing_events[0]["payload"]["evidence"]
+        "source_transition_events": (
+            [
+                {
+                    "step": int(event["step"]),
+                    "payload": event.get("payload", {}),
+                }
+                for event in transition_events
+            ]
             if strict_topology
-            else None
+            else []
         ),
     }
     write_json_atomic(validation_path, report)
