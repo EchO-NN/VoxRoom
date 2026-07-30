@@ -515,7 +515,9 @@ class RuntimeDashboard:
     def _draw_voxroom(self, image):
         axis = self.voxroom_axis
         axis.clear()
-        axis.set_title("VoxRoom nvblox + learned room mask")
+        axis.set_title(
+            "VoxRoom nvblox + learned room mask + Vertical Free Map"
+        )
         if image is None:
             axis.set_facecolor("#eeeeee")
             axis.text(
