@@ -14,10 +14,20 @@ from PIL import Image, ImageStat
 from frontier_detection import Frontier_detection
 from topomap_construction import Topomap_construction
 from visualization import RuntimeDashboard, TopologyEventRecorder
-from scripts.validate_run import check_capture_marker
+from scripts.validate_run import check_capture_marker, unique_step_signatures
 
 
 class VisualReproductionTests(unittest.TestCase):
+    def test_same_step_physical_captures_are_compared_once(self):
+        first = {"rgb": "a", "map": "b", "voxroom": "c"}
+        terminal = {"rgb": "d", "map": "e", "voxroom": "f"}
+
+        signatures = unique_step_signatures(
+            [(30, first), (30, first), (40, terminal)]
+        )
+
+        self.assertEqual(signatures, [first, terminal])
+
     def test_topology_snapshot_and_exit_events(self):
         events = []
 

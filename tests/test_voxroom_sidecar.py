@@ -41,6 +41,19 @@ class VoxRoomGeometryTests(unittest.TestCase):
             "context_mode and not args.roomseg_coverage_eval",
             validator_source,
         )
+        self.assertNotIn("confirm_pending_transition", runtime_source)
+        self.assertIn('"room_transition_advanced"', runtime_source)
+        self.assertIn(
+            'transition_method="upstream_source_semantics"',
+            runtime_source,
+        )
+
+    def test_missing_accepted_door_collection_is_rejected(self):
+        with self.assertRaisesRegex(
+            TypeError,
+            "accepted door collection is required",
+        ):
+            _door_segments_rc(None)
 
     def test_original_xy_door_endpoints_are_converted_to_row_col(self):
         segments = _door_segments_rc(

@@ -292,7 +292,7 @@ class VoxRoomSidecarClient:
         if ready != {"status": "ready"}:
             raise RuntimeError("VoxRoom worker returned an invalid ready message: {}".format(ready))
 
-    def update(self, step, simulator_step, info, detected_doors=None):
+    def update(self, step, simulator_step, info, detected_doors):
         if self.closed:
             raise RuntimeError("VoxRoom sidecar is already closed")
         step = int(step)
@@ -421,7 +421,7 @@ class VoxRoomSidecarClient:
         with Image.open(path) as image:
             return np.asarray(image.convert("RGB")).copy()
 
-    def close(self, detected_doors=None):
+    def close(self, detected_doors):
         if self.closed:
             return self.final_result
         request = {"op": "close"}
@@ -493,8 +493,10 @@ class VoxRoomSidecarClient:
 
 
 def _door_segments_rc(detected_doors):
+    if detected_doors is None:
+        raise TypeError("TVARS accepted door collection is required")
     segments = []
-    for door in list(detected_doors or []):
+    for door in list(detected_doors):
         start = np.asarray(door["start"], dtype=np.int32).reshape(-1)
         end = np.asarray(door["end"], dtype=np.int32).reshape(-1)
         if start.size != 2 or end.size != 2:

@@ -345,6 +345,13 @@ def expected_physical_checkpoint_steps(executed_steps, checkpoint_every_steps):
     )
 
 
+def unique_step_signatures(captures):
+    signatures_by_step = {}
+    for step, signature in captures:
+        signatures_by_step.setdefault(int(step), signature)
+    return [signatures_by_step[step] for step in sorted(signatures_by_step)]
+
+
 def collect_artifact_hashes(run_dir):
     hashes = {}
     sizes = {}
@@ -359,6 +366,253 @@ def collect_artifact_hashes(run_dir):
         hashes[relative_path] = sha256(path)
         sizes[relative_path] = path.stat().st_size
     return hashes, sizes
+
+
+def _confined_artifact(run_dir, value, label):
+    path = Path(str(value)).expanduser().resolve()
+    try:
+        path.relative_to(run_dir)
+    except ValueError as exc:
+        raise RuntimeError(
+            "{} escapes the run directory: {}".format(label, path)
+        ) from exc
+    if not path.is_file():
+        raise FileNotFoundError("{} is missing: {}".format(label, path))
+    return path
+
+
+def _npz_scalar(data, key):
+    if key not in data.files or data[key].ndim != 0:
+        raise RuntimeError("Coverage snapshot scalar is missing: {}".format(key))
+    return data[key].item()
+
+
+def validate_coverage_artifacts(run_dir, paths, result, executed_steps):
+    sidecar_result = json.loads(paths["voxroom_result"].read_text())
+    manifest = json.loads(paths["coverage_manifest"].read_text())
+    reference = json.loads(paths["coverage_reference_json"].read_text())
+    if result.get("voxroom_sidecar") is not True:
+        raise RuntimeError("Coverage run did not enable the VoxRoom sidecar")
+    embedded_sidecar_result = dict(result.get("voxroom_result") or {})
+    embedded_result_path = Path(
+        embedded_sidecar_result.pop("result_path", "")
+    ).resolve()
+    if (
+        embedded_sidecar_result != sidecar_result
+        or embedded_result_path != paths["voxroom_result"]
+    ):
+        raise RuntimeError("Embedded VoxRoom result differs from its artifact")
+    if (
+        sidecar_result.get("status") != "completed"
+        or sidecar_result.get("roomseg_coverage_eval") is not True
+        or int(sidecar_result.get("door_seed_model_fallback_count", -1)) != 0
+        or int(sidecar_result.get("last_step", -1)) != executed_steps
+        or int(sidecar_result.get("processed_frames", -1)) != executed_steps + 1
+    ):
+        raise RuntimeError("VoxRoom coverage worker did not close strictly")
+    if Path(sidecar_result.get("roomseg_coverage_manifest", "")).resolve() != paths[
+        "coverage_manifest"
+    ]:
+        raise RuntimeError("VoxRoom result references the wrong coverage manifest")
+    expected_milestones = [
+        float(value) / 100.0
+        for value in str(result["roomseg_coverage_milestones"]).split(",")
+    ]
+    if (
+        manifest.get("schema_version") != "voxroom_roomseg_coverage_eval_v1"
+        or manifest.get("terminal_event_required") is not True
+        or manifest.get("coverage_definition")
+        != "current_observed_intersection_fixed_full_explorable"
+        or manifest.get("comparison_method")
+        != "tvars_original_accepted_door_line_partition"
+        or manifest.get("milestones") != expected_milestones
+    ):
+        raise RuntimeError("Coverage manifest contract changed")
+    total_explorable_cells = int(manifest.get("total_explorable_cells", 0))
+    if total_explorable_cells <= 0:
+        raise RuntimeError("Coverage reference has no explorable cells")
+    if (
+        reference.get("total_explorable_cells") != total_explorable_cells
+        or reference.get("coverage_definition")
+        != manifest.get("coverage_definition")
+        or Path(manifest.get("reference_json", "")).resolve()
+        != paths["coverage_reference_json"]
+        or Path(manifest.get("reference_npz", "")).resolve()
+        != paths["coverage_reference_npz"]
+    ):
+        raise RuntimeError("Fixed full-scene coverage reference is inconsistent")
+    with np.load(paths["coverage_reference_npz"], allow_pickle=False) as data:
+        reference_arrays = set(data.files)
+        if not reference_arrays or not any(
+            "explorable" in name for name in reference_arrays
+        ):
+            raise RuntimeError("Coverage reference NPZ lacks an explorable mask")
+
+    events = manifest.get("events")
+    if not isinstance(events, list) or not events:
+        raise RuntimeError("Coverage manifest contains no events")
+    if len({event.get("event_id") for event in events}) != len(events):
+        raise RuntimeError("Coverage event IDs are not unique")
+    if any(event.get("status") != "complete" for event in events):
+        raise RuntimeError("Coverage manifest contains an incomplete event")
+    event_steps = [int(event.get("step", -1)) for event in events]
+    event_coverage = [float(event.get("coverage_ratio", -1.0)) for event in events]
+    if event_steps != sorted(event_steps) or event_coverage != sorted(event_coverage):
+        raise RuntimeError("Coverage events are not monotonic")
+    final_events = [event for event in events if event.get("event_id") == "final"]
+    if (
+        len(final_events) != 1
+        or events[-1] is not final_events[0]
+        or final_events[0].get("event_kind") != "terminal_forced"
+        or final_events[0].get("threshold") is not None
+        or int(final_events[0].get("step", -1)) != executed_steps
+    ):
+        raise RuntimeError("Coverage run lacks one forced terminal event")
+
+    required_artifacts = {
+        "tvars_original_preview_png",
+        "tvars_original_snapshot_npz",
+        "tvars_original_summary_json",
+        "voxroom_navigation_png",
+        "voxroom_snapshot_npz",
+        "voxroom_summary_json",
+    }
+    required_source_arrays = {
+        "voxel_occupancy_state_zyx",
+        "voxel_occupancy_log_odds_zyx",
+        "voxel_sensor_range_count_zyx",
+        "voxel_final_room_label_map",
+        "roomseg_eval_reference_explorable_mask",
+        "roomseg_eval_explored_reference_mask",
+        "roomseg_eval_coordinate_frame",
+        "map_resolution_m",
+    }
+    required_baseline_arrays = {
+        "baseline_metadata_json",
+        "tvars_original_door_partition_label_map",
+        "roomseg_eval_reference_explorable_mask",
+        "roomseg_eval_explored_reference_mask",
+        "roomseg_eval_coordinate_frame",
+        "map_resolution_m",
+    }
+    coordinate_arrays = (
+        "map_resolution_m",
+        "roomseg_eval_coordinate_frame",
+        "roomseg_eval_reference_explorable_mask",
+        "roomseg_eval_explored_reference_mask",
+    )
+    event_evidence = []
+    for event in events:
+        if (
+            int(event.get("total_explorable_cells", -1))
+            != total_explorable_cells
+        ):
+            raise RuntimeError("Coverage event denominator changed")
+        if event.get("event_kind") == "coverage_milestone":
+            threshold = float(event.get("threshold", -1.0))
+            if threshold not in expected_milestones or event["coverage_ratio"] < threshold:
+                raise RuntimeError("Coverage milestone was emitted before its threshold")
+        artifacts = event.get("artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != required_artifacts:
+            raise RuntimeError("Coverage event artifact inventory changed")
+        resolved = {
+            key: _confined_artifact(
+                run_dir,
+                value,
+                "coverage {} {}".format(event["event_id"], key),
+            )
+            for key, value in artifacts.items()
+        }
+        source_path = resolved["voxroom_snapshot_npz"]
+        baseline_path = resolved["tvars_original_snapshot_npz"]
+        with np.load(source_path, allow_pickle=False) as source, np.load(
+            baseline_path,
+            allow_pickle=False,
+        ) as baseline:
+            if not required_source_arrays.issubset(source.files):
+                raise RuntimeError("VoxRoom coverage snapshot lacks full voxel state")
+            if not required_baseline_arrays.issubset(baseline.files):
+                raise RuntimeError("TVARS coverage snapshot lacks evaluation arrays")
+            voxel_shape = source["voxel_occupancy_state_zyx"].shape
+            if (
+                len(voxel_shape) != 3
+                or source["voxel_occupancy_log_odds_zyx"].shape != voxel_shape
+                or source["voxel_sensor_range_count_zyx"].shape != voxel_shape
+            ):
+                raise RuntimeError("Coverage voxel arrays have inconsistent shapes")
+            if any(name.endswith("_zyx") for name in baseline.files):
+                raise RuntimeError("TVARS snapshot duplicates the shared 3D voxel state")
+            if any(
+                not np.array_equal(source[name], baseline[name])
+                for name in coordinate_arrays
+            ):
+                raise RuntimeError("Coverage methods do not share one coordinate frame")
+            if "map_bounds_xyxy_m" in source.files and (
+                "map_bounds_xyxy_m" not in baseline.files
+                or not np.array_equal(
+                    source["map_bounds_xyxy_m"],
+                    baseline["map_bounds_xyxy_m"],
+                )
+            ):
+                raise RuntimeError("Coverage methods have different world bounds")
+            reference_shape = source[
+                "roomseg_eval_reference_explorable_mask"
+            ].shape
+            if (
+                source["voxel_final_room_label_map"].shape != reference_shape
+                or baseline["tvars_original_door_partition_label_map"].shape
+                != reference_shape
+            ):
+                raise RuntimeError("Coverage room labels are not grid-aligned")
+            for data in (source, baseline):
+                if (
+                    str(_npz_scalar(data, "roomseg_eval_event_id"))
+                    != event["event_id"]
+                    or str(_npz_scalar(data, "roomseg_eval_event_kind"))
+                    != event["event_kind"]
+                    or int(_npz_scalar(data, "step")) != int(event["step"])
+                    or int(
+                        _npz_scalar(
+                            data,
+                            "roomseg_eval_total_explorable_cells",
+                        )
+                    )
+                    != total_explorable_cells
+                    or not np.isclose(
+                        float(_npz_scalar(data, "roomseg_eval_coverage_ratio")),
+                        float(event["coverage_ratio"]),
+                    )
+                ):
+                    raise RuntimeError("Coverage snapshot event metadata differs")
+            baseline_metadata = json.loads(
+                str(_npz_scalar(baseline, "baseline_metadata_json"))
+            )
+            shared_source = Path(
+                baseline_metadata.get("shared_voxel_snapshot", "")
+            ).resolve()
+            if (
+                shared_source != source_path
+                or Path(baseline_metadata.get("source_snapshot", "")).resolve()
+                != source_path
+            ):
+                raise RuntimeError("TVARS snapshot does not reference the shared voxel")
+        event_evidence.append(
+            {
+                "event_id": event["event_id"],
+                "step": int(event["step"]),
+                "coverage_ratio": float(event["coverage_ratio"]),
+                "voxel_shape_zyx": list(voxel_shape),
+                "voxroom_snapshot_sha256": sha256(source_path),
+                "tvars_snapshot_sha256": sha256(baseline_path),
+            }
+        )
+    return {
+        "fixed_total_explorable_cells": total_explorable_cells,
+        "event_count": len(events),
+        "events": event_evidence,
+        "forced_final_step": executed_steps,
+        "door_seed_model_fallback_count": 0,
+    }
 
 
 def main():
@@ -430,6 +684,30 @@ def main():
                 "terminal_ack": run_dir / "terminal_capture_ack.txt",
                 "input_manifest": run_dir / "input_manifest.json",
                 "input_dataset": run_dir / "input_dataset.json.gz",
+            }
+        )
+    if args.roomseg_coverage_eval:
+        paths.update(
+            {
+                "voxroom_result": run_dir / "voxroom" / "result.json",
+                "coverage_manifest": (
+                    run_dir
+                    / "voxroom"
+                    / "roomseg_coverage_eval"
+                    / "manifest.json"
+                ),
+                "coverage_reference_json": (
+                    run_dir
+                    / "voxroom"
+                    / "roomseg_coverage_eval"
+                    / "scene_reference.json"
+                ),
+                "coverage_reference_npz": (
+                    run_dir
+                    / "voxroom"
+                    / "roomseg_coverage_eval"
+                    / "scene_reference.npz"
+                ),
             }
         )
     missing = [str(path) for path in paths.values() if not path.is_file()]
@@ -651,6 +929,16 @@ def main():
         )
     if topology.get("completion_reason") != completion_reason:
         raise RuntimeError("Topology completion reason differs from the result")
+    coverage_evidence = (
+        validate_coverage_artifacts(
+            run_dir,
+            paths,
+            result,
+            executed_steps,
+        )
+        if args.roomseg_coverage_eval
+        else None
+    )
     window_viewable_checks = int(visualization.get("window_viewable_checks", 0))
     if window_viewable_checks < 3:
         raise RuntimeError("The live window was not monitored throughout the run")
@@ -1379,9 +1667,24 @@ def main():
             checkpoint_render_frame_panel_phash,
             "Physical-window checkpoint render frames",
         )
+        physical_capture_signatures = [
+            (
+                stage_step,
+                live_capture_panel_signatures["window_{}".format(stage_name)],
+            )
+            for stage_name, stage_step in rendered_stage_steps.items()
+        ]
+        physical_capture_signatures.append(
+            (
+                executed_steps,
+                live_capture_panel_signatures["window_terminal"],
+            )
+        )
+        physical_capture_signatures.extend(
+            zip(checkpoint_steps, checkpoint_panel_signatures)
+        )
         require_distinct_panel_signatures(
-            list(live_capture_panel_signatures.values())
-            + checkpoint_panel_signatures,
+            unique_step_signatures(physical_capture_signatures),
             "Physical X11 capture sequence",
         )
     frame_count = int(visualization_manifest.get("frame_count", 0))
@@ -1584,6 +1887,7 @@ def main():
         "steps": executed_steps,
         "early_completion": early_completion,
         "roomseg_coverage_eval": bool(args.roomseg_coverage_eval),
+        "coverage_evidence": coverage_evidence,
         "image_sizes": image_sizes,
         "image_sha256": image_hashes,
         "live_capture_panel_phash": live_capture_panel_signatures,
