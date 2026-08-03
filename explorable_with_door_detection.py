@@ -402,8 +402,13 @@ def main():
             raise RuntimeError("Gibson run context requires the pinned task config")
         if args.split != "val":
             raise RuntimeError("Gibson run context requires the val split")
-        if not args.require_topology_transition:
-            raise RuntimeError("Gibson run context requires topology transitions")
+        expected_topology_transition = not bool(args.roomseg_coverage_eval)
+        if bool(args.require_topology_transition) != expected_topology_transition:
+            raise RuntimeError(
+                "Gibson run context requires topology transitions for the "
+                "original reproduction and forbids them for coverage-based "
+                "segmentation evaluation"
+            )
         if args.pad_episode_to_max_steps:
             raise RuntimeError("Gibson run context forbids episode-tail padding")
         if not args.visualize:
