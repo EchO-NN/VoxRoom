@@ -19,6 +19,29 @@ from voxroom_sidecar import (
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
+    def test_coverage_evaluation_has_a_mode_specific_completion_contract(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        runtime_source = (
+            repository_root / "explorable_with_door_detection.py"
+        ).read_text(encoding="utf-8")
+        launcher_source = (
+            repository_root / "scripts" / "run_habitat_test.sh"
+        ).read_text(encoding="utf-8")
+        validator_source = (
+            repository_root / "scripts" / "validate_run.py"
+        ).read_text(encoding="utf-8")
+
+        for source in (runtime_source, launcher_source, validator_source):
+            self.assertIn("coverage_episode_step_limit_reached", source)
+            self.assertIn("coverage_exploration_completed", source)
+        self.assertIn('"coverage_episode_completed"', runtime_source)
+        self.assertIn("--roomseg-coverage-eval", launcher_source)
+        self.assertIn("--roomseg-coverage-eval", validator_source)
+        self.assertIn(
+            "context_mode and not args.roomseg_coverage_eval",
+            validator_source,
+        )
+
     def test_original_xy_door_endpoints_are_converted_to_row_col(self):
         segments = _door_segments_rc(
             [{"start": [17, 23], "end": [41, 29]}]

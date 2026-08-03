@@ -369,7 +369,13 @@ def main():
     parser.add_argument("--require-topology-transition", action="store_true")
     parser.add_argument("--allow-early-completion", action="store_true")
     parser.add_argument("--require-run-context", action="store_true")
+    parser.add_argument("--roomseg-coverage-eval", action="store_true")
     args = parser.parse_args()
+
+    if args.roomseg_coverage_eval and args.require_topology_transition:
+        raise RuntimeError(
+            "Coverage evaluation cannot require a topology transition"
+        )
 
     repository_root = Path(__file__).resolve().parents[1]
     validator_commit = subprocess.check_output(
@@ -387,7 +393,10 @@ def main():
 
     run_dir = Path(args.run_dir).resolve()
     context_mode = detect_run_context(run_dir, required=args.require_run_context)
-    strict_topology = bool(args.require_topology_transition or context_mode)
+    strict_topology = bool(
+        args.require_topology_transition
+        or (context_mode and not args.roomseg_coverage_eval)
+    )
     early_completion = bool(args.allow_early_completion or context_mode)
     paths = {
         "result": run_dir / "result.json",
@@ -463,6 +472,28 @@ def main():
     )
     if recorded_context != context_mode:
         raise RuntimeError("Recorded run context and input evidence disagree")
+
+    recorded_coverage_modes = {
+        metadata.get("roomseg_coverage_eval"),
+        result.get("roomseg_coverage_eval"),
+        topology.get("roomseg_coverage_eval"),
+    }
+    if recorded_coverage_modes != {bool(args.roomseg_coverage_eval)}:
+        raise RuntimeError(
+            "Coverage-evaluation mode differs between command and artifacts"
+        )
+    recorded_milestones = {
+        metadata.get("roomseg_coverage_milestones"),
+        result.get("roomseg_coverage_milestones"),
+        topology.get("roomseg_coverage_milestones"),
+    }
+    if args.roomseg_coverage_eval and (
+        len(recorded_milestones) != 1
+        or None in recorded_milestones
+    ):
+        raise RuntimeError(
+            "Coverage milestones differ between run artifacts"
+        )
 
     if result.get("status") != "completed":
         raise RuntimeError("Run did not complete: {}".format(result))
@@ -602,8 +633,22 @@ def main():
     if result.get("finished_at_unix", 0) <= result.get("started_at_unix", 0):
         raise RuntimeError("Invalid run timestamps")
     completion_reason = result.get("completion_reason")
-    if completion_reason != "topology_exploration_completed":
-        raise RuntimeError("Run does not have the natural topology completion reason")
+    if args.roomseg_coverage_eval:
+        expected_completion_reasons = {
+            "coverage_episode_step_limit_reached",
+            "coverage_exploration_completed",
+        }
+    else:
+        expected_completion_reasons = {"topology_exploration_completed"}
+    if completion_reason not in expected_completion_reasons:
+        raise RuntimeError("Run has the wrong mode-specific completion reason")
+    if (
+        completion_reason == "coverage_episode_step_limit_reached"
+        and executed_steps != args.expected_steps
+    ):
+        raise RuntimeError(
+            "Coverage step-limit completion did not execute the exact limit"
+        )
     if topology.get("completion_reason") != completion_reason:
         raise RuntimeError("Topology completion reason differs from the result")
     window_viewable_checks = int(visualization.get("window_viewable_checks", 0))
@@ -664,6 +709,10 @@ def main():
             )
         if not topology.get("requirement_met"):
             raise RuntimeError("Upstream-source topology requirement was not met")
+    elif args.roomseg_coverage_eval and (
+        topology.get("status") != "coverage_segmentation_evaluation"
+    ):
+        raise RuntimeError("Coverage run has the wrong topology artifact status")
 
     progress = [
         json.loads(line)
@@ -732,10 +781,15 @@ def main():
     ):
         raise RuntimeError("Topology event step is outside the episode")
     event_types = {event.get("event_type") for event in topology_events}
+    completion_event_type = (
+        "coverage_episode_completed"
+        if args.roomseg_coverage_eval
+        else "topology_exploration_completed"
+    )
     required_event_types = {
         "topology_initialized",
         "exploration_started",
-        "topology_exploration_completed",
+        completion_event_type,
         "episode_control_completed",
         "run_completed",
     }
@@ -750,7 +804,7 @@ def main():
     if "exploration_aborted" in event_types:
         raise RuntimeError("Topology event stream contains an aborted exploration")
     completion_event_types = [
-        "topology_exploration_completed",
+        completion_event_type,
         "episode_control_completed",
         "run_completed",
     ]
@@ -847,9 +901,7 @@ def main():
         != hashlib.sha256(args.run_id.encode("utf-8")).hexdigest()
     ):
         raise RuntimeError("Visualization capture-marker identity changed")
-    topology_completion_event = completion_events[
-        "topology_exploration_completed"
-    ][0]
+    topology_completion_event = completion_events[completion_event_type][0]
     if (
         int(topology_completion_event["step"])
         != int(result.get("topology_exploration_steps", -1))
@@ -880,7 +932,7 @@ def main():
     ):
         raise RuntimeError("Control/run completion events have the wrong step")
     if early_completion and int(topology_completion_event["step"]) != executed_steps:
-        raise RuntimeError("Early-completion topology event has the wrong step")
+        raise RuntimeError("Completion event has the wrong final step")
     if strict_topology:
         transition_events = [
             event
@@ -1446,10 +1498,17 @@ def main():
             raise RuntimeError("Executed episode differs from run context")
         if actual_episode_contract_sha256 != input_episode_contract_sha256:
             raise RuntimeError("Executed episode contract differs from run context")
-        if metadata.get("require_topology_transition") is not True:
-            raise RuntimeError("Strict run metadata disabled topology validation")
-        if result.get("require_topology_transition") is not True:
-            raise RuntimeError("Strict run result disabled topology validation")
+        expected_topology_transition = not args.roomseg_coverage_eval
+        if (
+            metadata.get("require_topology_transition")
+            is not expected_topology_transition
+        ):
+            raise RuntimeError("Strict run metadata has the wrong topology mode")
+        if (
+            result.get("require_topology_transition")
+            is not expected_topology_transition
+        ):
+            raise RuntimeError("Strict run result has the wrong topology mode")
         if metadata.get("pad_episode_to_max_steps") is not False:
             raise RuntimeError("Strict run metadata enabled episode-tail padding")
         if result.get("pad_episode_to_max_steps") is not False:
@@ -1471,9 +1530,19 @@ def main():
             "--split val",
             "--run_context_manifest",
             "--run_context_dataset",
-            "--require_topology_transition 1",
             "--pad_episode_to_max_steps 0",
         }
+        if args.roomseg_coverage_eval:
+            required_command_fragments.update(
+                {
+                    "--require_topology_transition 0",
+                    "--roomseg_coverage_eval 1",
+                }
+            )
+        else:
+            required_command_fragments.add(
+                "--require_topology_transition 1"
+            )
         if any(fragment not in command for fragment in required_command_fragments):
             raise RuntimeError("Command is not bound to the strict run context")
 
@@ -1514,6 +1583,7 @@ def main():
         "requested_max_steps": args.expected_steps,
         "steps": executed_steps,
         "early_completion": early_completion,
+        "roomseg_coverage_eval": bool(args.roomseg_coverage_eval),
         "image_sizes": image_sizes,
         "image_sha256": image_hashes,
         "live_capture_panel_phash": live_capture_panel_signatures,

@@ -600,10 +600,18 @@ capture_terminal_if_ready() {
         || "$ready_step" != "$current_progress" \
         || "$ready_render_step" != "$current_progress" \
         || "$ready_frame_file" != "visualization_final.png" \
-        || ! "$ready_frame_sha256" =~ ^[0-9a-f]{64}$ \
-        || "$ready_completion_reason" \
-            != "topology_exploration_completed" ]]; then
+        || ! "$ready_frame_sha256" =~ ^[0-9a-f]{64}$ ]]; then
         echo "Terminal capture handshake identity mismatch" >&2
+        return 1
+    fi
+    if [[ "$ROOMSEG_COVERAGE_EVAL" == "1" ]]; then
+        if [[ "$ready_completion_reason" != "coverage_episode_step_limit_reached" \
+            && "$ready_completion_reason" != "coverage_exploration_completed" ]]; then
+            echo "Terminal capture has the wrong coverage completion reason" >&2
+            return 1
+        fi
+    elif [[ "$ready_completion_reason" != "topology_exploration_completed" ]]; then
+        echo "Terminal capture has the wrong topology completion reason" >&2
         return 1
     fi
     verify_live_window "$window_id"
@@ -882,6 +890,9 @@ if [[ "$ALLOW_EARLY_COMPLETION" == "1" ]]; then
 fi
 if [[ "$RUN_CONTEXT_REQUIRED" == "1" ]]; then
     validation_args+=(--require-run-context)
+fi
+if [[ "$ROOMSEG_COVERAGE_EVAL" == "1" ]]; then
+    validation_args+=(--roomseg-coverage-eval)
 fi
 timeout --signal=TERM --kill-after=10s 300s "${validation_args[@]}"
 

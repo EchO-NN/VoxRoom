@@ -437,6 +437,8 @@ def main():
             args.window_checkpoint_every_steps
         ),
         "require_topology_transition": bool(args.require_topology_transition),
+        "roomseg_coverage_eval": bool(args.roomseg_coverage_eval),
+        "roomseg_coverage_milestones": str(args.roomseg_coverage_milestones),
         "pad_episode_to_max_steps": bool(args.pad_episode_to_max_steps),
         "task_config": args.task_config,
         "split": args.split,
@@ -1880,6 +1882,36 @@ def main():
             global t_start
             t_start = time()
 
+            def finish_coverage_evaluation(reason, termination, exhausted_stage=None):
+                if not args.roomseg_coverage_eval:
+                    raise RuntimeError(
+                        "Coverage completion was requested outside coverage mode"
+                    )
+                if (
+                    termination == "step_limit"
+                    and action_count != args.max_episode_length
+                ):
+                    raise RuntimeError(
+                        "Coverage step-limit completion did not reach the exact limit"
+                    )
+                elapsed_seconds = time() - t_start
+                runtime_state["topology_exploration_complete_step"] = action_count
+                runtime_state["completion_reason"] = str(reason)
+                set_runtime_phase("coverage_complete", reason)
+                record_event(
+                    "coverage_episode_completed",
+                    topology=topo.snapshot(),
+                    elapsed_seconds=elapsed_seconds,
+                    termination=termination,
+                    exhausted_stage=exhausted_stage,
+                )
+                set_runtime_phase("completed")
+                record_event(
+                    "episode_control_completed",
+                    executed_steps=action_count,
+                )
+                return runtime_state["completion_reason"]
+
             def abort(reason):
                 runtime_state["completion_reason"] = str(reason)
                 set_runtime_phase("aborted", reason)
@@ -1900,6 +1932,15 @@ def main():
             locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)  # long term goal is under local frame
 
             if not locs.any():
+                if (
+                    args.roomseg_coverage_eval
+                    and action_count == args.max_episode_length
+                ):
+                    return finish_coverage_evaluation(
+                        "coverage_episode_step_limit_reached",
+                        "step_limit",
+                        "initial_scan",
+                    )
                 abort("initial_scan_exhausted")
             print('first long term goal {}'.format(long_term_goal))
             first_flag = False
@@ -1909,6 +1950,15 @@ def main():
                 # first searching the current room
                 locs, stg, long_term_goal = room_searching(locs, stg, long_term_goal, first_flag, whether_returning)
                 if not locs.any():
+                    if (
+                        args.roomseg_coverage_eval
+                        and action_count == args.max_episode_length
+                    ):
+                        return finish_coverage_evaluation(
+                            "coverage_episode_step_limit_reached",
+                            "step_limit",
+                            "room_search",
+                        )
                     abort("room_search_exhausted")
                 # here is the room to room moving part
                 (
@@ -1925,10 +1975,28 @@ def main():
                     first_flag,
                 )
                 if not locs.any():
+                    if (
+                        args.roomseg_coverage_eval
+                        and action_count == args.max_episode_length
+                    ):
+                        return finish_coverage_evaluation(
+                            "coverage_episode_step_limit_reached",
+                            "step_limit",
+                            "room_transition",
+                        )
                     abort("room_transition_exhausted")
                 set_runtime_phase("transition_confirmation_scan")
                 locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)
                 if not locs.any():
+                    if (
+                        args.roomseg_coverage_eval
+                        and action_count == args.max_episode_length
+                    ):
+                        return finish_coverage_evaluation(
+                            "coverage_episode_step_limit_reached",
+                            "step_limit",
+                            "transition_confirmation_scan",
+                        )
                     abort("transition_confirmation_scan_exhausted")
                 transition_confirmed, transition_evidence = (
                     topo.confirm_pending_transition(
@@ -1964,6 +2032,11 @@ def main():
                     )
             t_end = time()
             print('time cost {}'.format(t_end-t_start))
+            if args.roomseg_coverage_eval:
+                return finish_coverage_evaluation(
+                    "coverage_exploration_completed",
+                    "navigation_complete",
+                )
             runtime_state["topology_exploration_complete_step"] = action_count
             runtime_state["completion_reason"] = "topology_exploration_completed"
             set_runtime_phase("topology_complete")
@@ -1989,7 +2062,15 @@ def main():
             return runtime_state["completion_reason"]
 
         completion_reason = exploration(locs)
-        if completion_reason != "topology_exploration_completed":
+        expected_completion_reasons = (
+            {
+                "coverage_episode_step_limit_reached",
+                "coverage_exploration_completed",
+            }
+            if args.roomseg_coverage_eval
+            else {"topology_exploration_completed"}
+        )
+        if completion_reason not in expected_completion_reasons:
             raise RuntimeError("Exploration returned without a completion reason")
 
         topology_snapshot = topo.snapshot()
@@ -2024,7 +2105,9 @@ def main():
             confirmed_crossing_evidence,
             topology_snapshot,
         )
-        if topology_transition_count > 0 and surviving_door_crossing_count > 0:
+        if args.roomseg_coverage_eval:
+            topology_status = "coverage_segmentation_evaluation"
+        elif topology_transition_count > 0 and surviving_door_crossing_count > 0:
             topology_status = "cross_room_verified"
         elif topology_snapshot["edge_count"] > 0:
             topology_status = "topology_built_no_confirmed_crossing"
@@ -2046,6 +2129,8 @@ def main():
             "door_crossing_count": door_crossing_count,
             "surviving_door_crossing_count": surviving_door_crossing_count,
             "require_topology_transition": bool(args.require_topology_transition),
+            "roomseg_coverage_eval": bool(args.roomseg_coverage_eval),
+            "roomseg_coverage_milestones": str(args.roomseg_coverage_milestones),
             "requirement_met": (
                 not bool(args.require_topology_transition)
                 or (
@@ -2084,6 +2169,8 @@ def main():
             "completion_reason": completion_reason,
             "pad_episode_to_max_steps": bool(args.pad_episode_to_max_steps),
             "require_topology_transition": bool(args.require_topology_transition),
+            "roomseg_coverage_eval": bool(args.roomseg_coverage_eval),
+            "roomseg_coverage_milestones": str(args.roomseg_coverage_milestones),
             "task_config": args.task_config,
             "split": args.split,
             "runtime_install_sha256": runtime_install_sha256,
