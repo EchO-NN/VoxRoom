@@ -14,7 +14,11 @@ from PIL import Image, ImageStat
 from frontier_detection import Frontier_detection
 from topomap_construction import Topomap_construction
 from visualization import RuntimeDashboard, TopologyEventRecorder
-from scripts.validate_run import check_capture_marker, unique_step_signatures
+from scripts.validate_run import (
+    check_capture_marker,
+    unique_step_signatures,
+    validate_room_label_ids,
+)
 
 
 class VisualReproductionTests(unittest.TestCase):
@@ -27,6 +31,13 @@ class VisualReproductionTests(unittest.TestCase):
         )
 
         self.assertEqual(signatures, [first, terminal])
+
+    def test_coverage_labels_may_exclude_an_unexplored_topology_room(self):
+        self.assertEqual(validate_room_label_ids([1], 2, True), [1])
+        with self.assertRaisesRegex(RuntimeError, "mode-specific"):
+            validate_room_label_ids([1], 2, False)
+        with self.assertRaisesRegex(RuntimeError, "mode-specific"):
+            validate_room_label_ids([1, 3], 3, True)
 
     def test_topology_snapshot_and_exit_events(self):
         events = []

@@ -352,6 +352,24 @@ def unique_step_signatures(captures):
     return [signatures_by_step[step] for step in sorted(signatures_by_step)]
 
 
+def validate_room_label_ids(observed, topology_room_count, coverage_eval):
+    observed = [int(label) for label in observed]
+    topology_room_count = int(topology_room_count)
+    if not observed:
+        raise RuntimeError("Room-label artifact contains no explored room")
+    if coverage_eval:
+        expected = list(range(1, max(observed) + 1))
+        valid = observed == expected and max(observed) <= topology_room_count
+    else:
+        expected = list(range(1, topology_room_count + 1))
+        valid = observed == expected
+    if not valid:
+        raise RuntimeError(
+            "Room-label artifact violates the mode-specific topology contract"
+        )
+    return observed
+
+
 def collect_artifact_hashes(run_dir):
     hashes = {}
     sizes = {}
@@ -1147,11 +1165,11 @@ def main():
     observed_room_labels = [
         int(label) for label in np.unique(room_labels) if label > 0
     ]
-    expected_room_labels = list(range(1, int(snapshot["room_count"]) + 1))
-    if observed_room_labels != expected_room_labels:
-        raise RuntimeError(
-            "Room-label artifact does not cover every topology room"
-        )
+    observed_room_labels = validate_room_label_ids(
+        observed_room_labels,
+        snapshot["room_count"],
+        args.roomseg_coverage_eval,
+    )
     observed_room_pixel_counts = {
         str(label): int(np.count_nonzero(room_labels == label))
         for label in observed_room_labels
