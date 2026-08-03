@@ -329,7 +329,17 @@ class VoxRoomSidecarClient:
             )
         coverage_arrays = {}
         if self.coverage_eval:
-            required_coverage = ("gt_map", "gt_exp", "gt_explorable")
+            required_coverage = (
+                "gt_map",
+                "gt_exp",
+                "gt_explorable",
+                "gt_explorable_reference_source",
+                "gt_explorable_floor_height_m",
+                "gt_explorable_floor_slice_eps_m",
+                "gt_explorable_floor_island_index",
+                "gt_explorable_source_cells",
+                "gt_explorable_transformed_cells",
+            )
             missing_coverage = [
                 key for key in required_coverage if key not in info
             ]
@@ -344,6 +354,18 @@ class VoxRoomSidecarClient:
             explorable = np.asarray(info["gt_explorable"], dtype=bool)
             if occupied.shape != explored.shape or occupied.shape != explorable.shape:
                 raise RuntimeError("Habitat coverage maps do not share one shape")
+            reference_source = str(info["gt_explorable_reference_source"])
+            if reference_source != "habitat_pathfinder_start_floor_island_topdown":
+                raise RuntimeError(
+                    "Unexpected Habitat floor reference source: {}".format(
+                        reference_source
+                    )
+                )
+            transformed_cells = int(info["gt_explorable_transformed_cells"])
+            if transformed_cells != int(np.count_nonzero(explorable)):
+                raise RuntimeError(
+                    "Habitat floor reference cell count differs from its metadata"
+                )
             door_segments = _door_segments_rc(detected_doors)
             coverage_arrays = {
                 "habitat_map_shape_hw": np.asarray(occupied.shape, dtype=np.int32),
@@ -358,6 +380,22 @@ class VoxRoomSidecarClient:
                 ),
                 "habitat_map_resolution_m": np.asarray(
                     self.map_resolution_m, dtype=np.float64
+                ),
+                "habitat_floor_reference_source": np.asarray(reference_source),
+                "habitat_floor_height_m": np.asarray(
+                    info["gt_explorable_floor_height_m"], dtype=np.float64
+                ),
+                "habitat_floor_slice_eps_m": np.asarray(
+                    info["gt_explorable_floor_slice_eps_m"], dtype=np.float64
+                ),
+                "habitat_floor_island_index": np.asarray(
+                    info["gt_explorable_floor_island_index"], dtype=np.int32
+                ),
+                "habitat_floor_source_cells": np.asarray(
+                    info["gt_explorable_source_cells"], dtype=np.int64
+                ),
+                "habitat_floor_transformed_cells": np.asarray(
+                    transformed_cells, dtype=np.int64
                 ),
                 "tvars_door_segments_rc": np.asarray(
                     door_segments, dtype=np.int32

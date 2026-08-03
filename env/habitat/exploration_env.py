@@ -319,6 +319,24 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['gt_map'] = self.map
         self.info['gt_exp'] = self.explored_map
         self.info['gt_explorable'] = self.explorable_map
+        self.info['gt_explorable_reference_source'] = (
+            'habitat_pathfinder_start_floor_island_topdown'
+        )
+        self.info['gt_explorable_floor_height_m'] = float(
+            self.map_obj.floor_height_m
+        )
+        self.info['gt_explorable_floor_slice_eps_m'] = float(
+            self.map_obj.floor_slice_eps_m
+        )
+        self.info['gt_explorable_floor_island_index'] = int(
+            self.map_obj.floor_island_index
+        )
+        self.info['gt_explorable_source_cells'] = int(
+            self.map_obj.floor_cell_count
+        )
+        self.info['gt_explorable_transformed_cells'] = int(
+            self.map_obj.transformed_cell_count
+        )
         self.info['active_room_map_source'] = (
             'active_room_native_depth_projection'
         )
@@ -888,8 +906,20 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         grid_map = torch.from_numpy(grid_map).float()
         grid_map = grid_map.unsqueeze(0).unsqueeze(0)
-        translated = F.grid_sample(grid_map, trans_mat)
-        rotated = F.grid_sample(translated, rot_mat)
+        translated = F.grid_sample(
+            grid_map,
+            trans_mat,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=False,
+        )
+        rotated = F.grid_sample(
+            translated,
+            rot_mat,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=False,
+        )
 
         episode_map = torch.zeros((full_map_size, full_map_size)).float()
         if full_map_size > grid_size:
@@ -909,6 +939,20 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
 
         episode_map = episode_map.numpy()
         episode_map[episode_map > 0] = 1.
+        transformed_cells = int(np.count_nonzero(episode_map))
+        source_cells = int(self.map_obj.floor_cell_count)
+        relative_area_error = abs(transformed_cells - source_cells) / float(source_cells)
+        if relative_area_error > 0.01:
+            raise RuntimeError(
+                "PathFinder floor map lost area during episode-grid alignment: "
+                "source_cells={} transformed_cells={} relative_error={:.6f}".format(
+                    source_cells,
+                    transformed_cells,
+                    relative_area_error,
+                )
+            )
+        self.map_obj.transformed_cell_count = transformed_cells
+        self.map_obj.transform_relative_area_error = relative_area_error
 
         return episode_map
 
