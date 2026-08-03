@@ -44,6 +44,7 @@ from run_context_contract import (
     STRICT_VISUAL_CAPTURE_STEPS,
     episode_contract_sha256,
 )
+from topology_contract import surviving_crossing_count
 
 def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
     loc_r, loc_c = agent_loc
@@ -455,6 +456,7 @@ def main():
     }
     voxroom_sidecar = None
     runtime_timings = {}
+    confirmed_crossing_evidence = []
 
     def accumulate_timing(name, duration):
         duration = float(duration)
@@ -491,6 +493,10 @@ def main():
             action_count,
             **payload,
         )
+        if event_type == "door_crossing_confirmed":
+            confirmed_crossing_evidence.append(
+                json.loads(json.dumps(payload["evidence"]))
+            )
         return event
 
     def set_runtime_phase(phase, action="none"):
@@ -505,6 +511,7 @@ def main():
                 int(step),
                 int(info["time"]),
                 info,
+                detected_doors=detected_door_list,
             )
             accumulate_timing(
                 "voxroom_sidecar",
@@ -619,14 +626,20 @@ def main():
             config_path=args.voxroom_config,
             run_dir=run_dir,
             map_size_m=args.voxroom_map_size_m,
+            map_resolution_m=float(args.map_resolution) / 100.0,
             roomseg_every_steps=args.voxroom_roomseg_every_steps,
             visualization_every_steps=args.voxroom_visualization_every_steps,
             response_timeout_seconds=args.voxroom_response_timeout_seconds,
+            scene_id=Path(infos[0]["scene_name"]).stem,
+            episode_id=str(infos[0]["episode_id"]),
+            coverage_eval=bool(args.roomseg_coverage_eval),
+            coverage_milestones=args.roomseg_coverage_milestones,
         )
         voxroom_sidecar.update(
             0,
             int(infos[0]["time"]),
             infos[0],
+            detected_doors=[],
         )
         if infos[0].get("voxroom_navigation_map_source") != (
             "voxroom_last_voxel_navigation_projection"
@@ -1787,6 +1800,20 @@ def main():
             return locs, stg, long_term_goal
 
         def room_moving(locs, stg, long_term_goal, first_flag):
+            def global_xy(local_locs):
+                return [
+                    float(
+                        (local_locs[1] + origins[0][1])
+                        * 100
+                        / args.map_resolution
+                    ),
+                    float(
+                        (local_locs[0] + origins[0][0])
+                        * 100
+                        / args.map_resolution
+                    ),
+                ]
+
             achieve_flag = False
             set_runtime_phase("topology_exit_selection")
             exit_goal_list = topo.choose_door([(locs[0] + origins[0][0]) * 100 / args.map_resolution,
@@ -1796,7 +1823,9 @@ def main():
             return_step = 0
             return_threshold = 100#60
             reached_exit_count = 0
+            transition_trajectories = []
             for exit_goal in exit_goal_list:
+                segment_trajectory = [global_xy(locs)]
                 # for return_waypoint in return_list[1:]:
                 long_term_goal = [exit_goal[0] - origins[0][1] * 100 / args.map_resolution,
                                   exit_goal[1] - origins[0][0] * 100 / args.map_resolution]  # convert to local frame
@@ -1807,13 +1836,16 @@ def main():
                     locs, stg, long_term_goal, achieve_flag = go2goal(locs, stg, long_term_goal, first_flag,
                                                                       achieve_criterion=5)  # default is 5
                     if not locs.any():
+                        transition_trajectories.append(segment_trajectory)
                         return (
                             locs,
                             stg,
                             long_term_goal,
                             len(exit_goal_list),
                             reached_exit_count,
+                            transition_trajectories,
                         )
+                    segment_trajectory.append(global_xy(locs))
                     return_step += 1
                     # dist = pu.get_l2_distance(120, long_term_goal[0], 120, long_term_goal[1])
                     if return_step > return_threshold:
@@ -1829,12 +1861,14 @@ def main():
                         )
                         return_step = 0
                 achieve_flag = False
+                transition_trajectories.append(segment_trajectory)
             return (
                 locs,
                 stg,
                 long_term_goal,
                 len(exit_goal_list),
                 reached_exit_count,
+                transition_trajectories,
             )
 
         def exploration(locs):
@@ -1878,6 +1912,7 @@ def main():
                     long_term_goal,
                     exit_goal_count,
                     reached_exit_count,
+                    transition_trajectories,
                 ) = room_moving(
                     locs,
                     stg,
@@ -1886,18 +1921,35 @@ def main():
                 )
                 if not locs.any():
                     abort("room_transition_exhausted")
-                set_runtime_phase("room_entry_scan")
+                set_runtime_phase("transition_confirmation_scan")
                 locs, stg, long_term_goal, whether_returning = take_action(4, locs, first_flag)
                 if not locs.any():
-                    abort("room_entry_scan_exhausted")
-                if exit_goal_count > 0:
-                    print('moved to another room')
+                    abort("transition_confirmation_scan_exhausted")
+                transition_confirmed, transition_evidence = (
+                    topo.confirm_pending_transition(
+                        transition_trajectories,
+                        reached_exit_count,
+                    )
+                )
+                if exit_goal_count > 0 and transition_confirmed:
+                    print('room transition confirmed')
                     record_event(
-                        "room_transition_advanced",
+                        "room_transition_confirmed",
                         exit_goal_count=exit_goal_count,
                         reached_exit_count=reached_exit_count,
                         current_node_id=topo.current_node_id,
-                        transition_method="upstream_source_semantics",
+                        confirmation_method="trajectory_geometry",
+                        evidence=transition_evidence,
+                    )
+                elif exit_goal_count > 0:
+                    print('room transition not confirmed')
+                    record_event(
+                        "room_transition_not_confirmed",
+                        exit_goal_count=exit_goal_count,
+                        reached_exit_count=reached_exit_count,
+                        current_node_id=topo.current_node_id,
+                        confirmation_method="trajectory_geometry",
+                        evidence=transition_evidence,
                     )
                 else:
                     print('no room transition: topology has no exit goal')
@@ -1943,7 +1995,9 @@ def main():
             topology=topology_snapshot,
         )
         if voxroom_sidecar is not None:
-            runtime_state["voxroom_result"] = voxroom_sidecar.close()
+            runtime_state["voxroom_result"] = voxroom_sidecar.close(
+                detected_doors=detected_door_list,
+            )
         if dashboard is not None:
             if (
                 runtime_state["last_dashboard_info"] is None
@@ -1956,12 +2010,17 @@ def main():
             )
         event_summary = event_recorder.summary()
         topology_transition_count = int(
-            event_summary["event_counts"].get("room_transition_advanced", 0)
+            event_summary["event_counts"].get("room_transition_confirmed", 0)
         )
-        door_crossing_count = 0
-        surviving_door_crossing_count = 0
-        if topology_transition_count > 0:
-            topology_status = "cross_room_source_semantics"
+        door_crossing_count = int(
+            event_summary["event_counts"].get("door_crossing_confirmed", 0)
+        )
+        surviving_door_crossing_count = surviving_crossing_count(
+            confirmed_crossing_evidence,
+            topology_snapshot,
+        )
+        if topology_transition_count > 0 and surviving_door_crossing_count > 0:
+            topology_status = "cross_room_verified"
         elif topology_snapshot["edge_count"] > 0:
             topology_status = "topology_built_no_confirmed_crossing"
         else:
@@ -1984,7 +2043,10 @@ def main():
             "require_topology_transition": bool(args.require_topology_transition),
             "requirement_met": (
                 not bool(args.require_topology_transition)
-                or topology_transition_count > 0
+                or (
+                    topology_transition_count > 0
+                    and surviving_door_crossing_count > 0
+                )
             ),
             "topology_exploration_complete_step": runtime_state[
                 "topology_exploration_complete_step"

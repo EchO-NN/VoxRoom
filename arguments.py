@@ -189,6 +189,18 @@ def get_args():
     parser.add_argument('--voxroom_roomseg_every_steps', type=int, default=50)
     parser.add_argument('--voxroom_visualization_every_steps', type=int, default=5)
     parser.add_argument('--voxroom_response_timeout_seconds', type=float, default=300.0)
+    parser.add_argument(
+        '--roomseg_coverage_eval',
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help='segment VoxRoom and the original accepted-door map at fixed scene coverage milestones',
+    )
+    parser.add_argument(
+        '--roomseg_coverage_milestones',
+        type=str,
+        default='20,40,60,80,100',
+    )
 
     # Environment, dataset and episode specifications
     parser.add_argument('-efw', '--env_frame_width', type=int, default=256,  # 256 this is the resolution of the scene
@@ -318,6 +330,8 @@ def get_args():
             raise ValueError("--voxroom_visualization_every_steps must be positive")
         if args.voxroom_response_timeout_seconds <= 0.0:
             raise ValueError("--voxroom_response_timeout_seconds must be positive")
+    if args.roomseg_coverage_eval and not args.voxroom_sidecar:
+        raise ValueError("--roomseg_coverage_eval=1 requires --voxroom_sidecar=1")
     if args.run_context_manifest:
         args.run_context_manifest = str(
             Path(args.run_context_manifest).expanduser().resolve()

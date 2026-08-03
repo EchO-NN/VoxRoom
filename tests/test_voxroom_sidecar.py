@@ -12,12 +12,20 @@ from env.habitat.exploration_env import (
     habitat_states_to_voxroom,
 )
 from voxroom_sidecar import (
+    _door_segments_rc,
     attach_voxroom_projection,
     load_navigation_projection,
 )
 
 
 class VoxRoomGeometryTests(unittest.TestCase):
+    def test_original_xy_door_endpoints_are_converted_to_row_col(self):
+        segments = _door_segments_rc(
+            [{"start": [17, 23], "end": [41, 29]}]
+        )
+
+        self.assertEqual(segments, [[23, 17, 29, 41]])
+
     def test_active_room_keeps_native_mapping_pose_and_planner_pipeline(self):
         repository_root = Path(__file__).resolve().parents[1]
         runtime_source = (

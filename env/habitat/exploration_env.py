@@ -318,6 +318,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
         self.info['episode_contract_sha256'] = self.episode_contract_sha256
         self.info['gt_map'] = self.map
         self.info['gt_exp'] = self.explored_map
+        self.info['gt_explorable'] = self.explorable_map
         self.info['active_room_map_source'] = (
             'active_room_native_depth_projection'
         )
@@ -425,6 +426,7 @@ class Exploration_Env(habitat.RLEnv):#RLEnv
             self.map[door_pixel[0], door_pixel[1]] = 1"""
         self.info['gt_map'] = self.map # this three is added by boggy
         self.info['gt_exp'] = self.explored_map
+        self.info['gt_explorable'] = self.explorable_map
         self.info['pano_map'] = pano_map
         self.info['pano_exp'] = pano_exp
         self.info['scene_name'] = self.scene_name

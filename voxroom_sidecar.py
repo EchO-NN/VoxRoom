@@ -205,9 +205,14 @@ class VoxRoomSidecarClient:
         config_path,
         run_dir,
         map_size_m,
+        map_resolution_m,
         roomseg_every_steps,
         visualization_every_steps,
         response_timeout_seconds,
+        scene_id="",
+        episode_id="",
+        coverage_eval=False,
+        coverage_milestones="20,40,60,80,100",
     ):
         self.voxroom_root = Path(voxroom_root).expanduser().resolve()
         self.config_path = Path(config_path).expanduser().resolve()
@@ -216,6 +221,11 @@ class VoxRoomSidecarClient:
         self.frame_dir = self.run_dir / "voxroom_bridge_frames"
         self.stderr_path = self.run_dir / "voxroom_worker.log"
         self.response_timeout_seconds = float(response_timeout_seconds)
+        self.coverage_eval = bool(coverage_eval)
+        self.coverage_milestones = str(coverage_milestones)
+        self.map_resolution_m = float(map_resolution_m)
+        if not np.isfinite(self.map_resolution_m) or self.map_resolution_m <= 0.0:
+            raise ValueError("Active Room map resolution must be positive")
         self.last_step = -1
         self.last_simulator_step = -1
         self.latest_response = None
@@ -256,7 +266,19 @@ class VoxRoomSidecarClient:
             str(int(roomseg_every_steps)),
             "--visualization-every-steps",
             str(int(visualization_every_steps)),
+            "--scene-id",
+            str(scene_id),
+            "--episode-id",
+            str(episode_id),
         ]
+        if self.coverage_eval:
+            command.extend(
+                [
+                    "--coverage-eval",
+                    "--coverage-milestones",
+                    self.coverage_milestones,
+                ]
+            )
         self.process = subprocess.Popen(
             command,
             cwd=str(self.voxroom_root),
@@ -270,7 +292,7 @@ class VoxRoomSidecarClient:
         if ready != {"status": "ready"}:
             raise RuntimeError("VoxRoom worker returned an invalid ready message: {}".format(ready))
 
-    def update(self, step, simulator_step, info):
+    def update(self, step, simulator_step, info, detected_doors=None):
         if self.closed:
             raise RuntimeError("VoxRoom sidecar is already closed")
         step = int(step)
@@ -305,6 +327,42 @@ class VoxRoomSidecarClient:
                     simulator_step,
                 )
             )
+        coverage_arrays = {}
+        if self.coverage_eval:
+            required_coverage = ("gt_map", "gt_exp", "gt_explorable")
+            missing_coverage = [
+                key for key in required_coverage if key not in info
+            ]
+            if missing_coverage:
+                raise KeyError(
+                    "Habitat info is missing coverage fields: {}".format(
+                        missing_coverage
+                    )
+                )
+            occupied = np.asarray(info["gt_map"], dtype=bool)
+            explored = np.asarray(info["gt_exp"], dtype=bool)
+            explorable = np.asarray(info["gt_explorable"], dtype=bool)
+            if occupied.shape != explored.shape or occupied.shape != explorable.shape:
+                raise RuntimeError("Habitat coverage maps do not share one shape")
+            door_segments = _door_segments_rc(detected_doors)
+            coverage_arrays = {
+                "habitat_map_shape_hw": np.asarray(occupied.shape, dtype=np.int32),
+                "habitat_explorable_bits": np.packbits(
+                    explorable.reshape(-1), bitorder="little"
+                ),
+                "habitat_explored_bits": np.packbits(
+                    explored.reshape(-1), bitorder="little"
+                ),
+                "habitat_occupied_bits": np.packbits(
+                    occupied.reshape(-1), bitorder="little"
+                ),
+                "habitat_map_resolution_m": np.asarray(
+                    self.map_resolution_m, dtype=np.float64
+                ),
+                "tvars_door_segments_rc": np.asarray(
+                    door_segments, dtype=np.int32
+                ).reshape(-1, 4),
+            }
         frame_path = self.frame_dir / "frame_{:06d}.npz".format(simulator_step)
         with frame_path.open("wb") as stream:
             np.savez(
@@ -327,6 +385,7 @@ class VoxRoomSidecarClient:
                     info["voxroom_camera_transform_world"],
                     dtype=np.float64,
                 ),
+                **coverage_arrays
             )
             stream.flush()
             os.fsync(stream.fileno())
@@ -362,10 +421,15 @@ class VoxRoomSidecarClient:
         with Image.open(path) as image:
             return np.asarray(image.convert("RGB")).copy()
 
-    def close(self):
+    def close(self, detected_doors=None):
         if self.closed:
             return self.final_result
-        self._send({"op": "close"})
+        request = {"op": "close"}
+        if self.coverage_eval:
+            request["tvars_door_segments_rc"] = _door_segments_rc(
+                detected_doors
+            )
+        self._send(request)
         result = self._read_response()
         if result.get("status") != "completed":
             raise RuntimeError("VoxRoom worker did not complete: {}".format(result))
@@ -426,3 +490,16 @@ class VoxRoomSidecarClient:
                 )
             )
         return response
+
+
+def _door_segments_rc(detected_doors):
+    segments = []
+    for door in list(detected_doors or []):
+        start = np.asarray(door["start"], dtype=np.int32).reshape(-1)
+        end = np.asarray(door["end"], dtype=np.int32).reshape(-1)
+        if start.size != 2 or end.size != 2:
+            raise ValueError("TVARS accepted door endpoints must be 2D")
+        segments.append(
+            [int(start[1]), int(start[0]), int(end[1]), int(end[0])]
+        )
+    return segments

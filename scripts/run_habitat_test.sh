@@ -31,6 +31,8 @@ VOXROOM_MAP_SIZE_M="${VOXROOM_MAP_SIZE_M:-48.0}"
 VOXROOM_ROOMSEG_EVERY_STEPS="${VOXROOM_ROOMSEG_EVERY_STEPS:-50}"
 VOXROOM_VISUALIZATION_EVERY_STEPS="${VOXROOM_VISUALIZATION_EVERY_STEPS:-5}"
 VOXROOM_RESPONSE_TIMEOUT_SECONDS="${VOXROOM_RESPONSE_TIMEOUT_SECONDS:-300}"
+ROOMSEG_COVERAGE_EVAL="${ROOMSEG_COVERAGE_EVAL:-0}"
+ROOMSEG_COVERAGE_MILESTONES="${ROOMSEG_COVERAGE_MILESTONES:-20,40,60,80,100}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "Python environment is missing: $PYTHON" >&2
@@ -68,6 +70,15 @@ if [[ "$VOXROOM_SIDECAR" != "0" && "$VOXROOM_SIDECAR" != "1" ]]; then
     echo "VOXROOM_SIDECAR must be 0 or 1" >&2
     exit 1
 fi
+if [[ "$ROOMSEG_COVERAGE_EVAL" != "0" \
+    && "$ROOMSEG_COVERAGE_EVAL" != "1" ]]; then
+    echo "ROOMSEG_COVERAGE_EVAL must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$ROOMSEG_COVERAGE_EVAL" == "1" && "$VOXROOM_SIDECAR" != "1" ]]; then
+    echo "ROOMSEG_COVERAGE_EVAL requires VOXROOM_SIDECAR=1" >&2
+    exit 1
+fi
 if [[ "$VOXROOM_SIDECAR" == "1" ]]; then
     if [[ -z "$VOXROOM_ROOT" ]]; then
         echo "VOXROOM_ROOT is required when VOXROOM_SIDECAR=1" >&2
@@ -91,10 +102,14 @@ if [[ "$PAD_EPISODE_TO_MAX_STEPS" == "$ALLOW_EARLY_COMPLETION" ]]; then
     echo "Padding and early-completion modes are inconsistent" >&2
     exit 1
 fi
+required_topology_transition=1
+if [[ "$ROOMSEG_COVERAGE_EVAL" == "1" ]]; then
+    required_topology_transition=0
+fi
 if [[ "$RUN_CONTEXT_REQUIRED" == "1" \
     && ("$TASK_CONFIG" != "tasks/pointnav_gibson_visual.yaml" \
         || "$SPLIT" != "val" \
-        || "$REQUIRE_TOPOLOGY_TRANSITION" != "1" \
+        || "$REQUIRE_TOPOLOGY_TRANSITION" != "$required_topology_transition" \
         || "$PAD_EPISODE_TO_MAX_STEPS" != "0" \
         || "$ALLOW_EARLY_COMPLETION" != "1" \
         || "$VISUALIZATION_FRAME_EVERY_STEPS" != "5" \
@@ -259,6 +274,8 @@ if [[ "$VOXROOM_SIDECAR" == "1" ]]; then
         --voxroom_roomseg_every_steps "$VOXROOM_ROOMSEG_EVERY_STEPS"
         --voxroom_visualization_every_steps "$VOXROOM_VISUALIZATION_EVERY_STEPS"
         --voxroom_response_timeout_seconds "$VOXROOM_RESPONSE_TIMEOUT_SECONDS"
+        --roomseg_coverage_eval "$ROOMSEG_COVERAGE_EVAL"
+        --roomseg_coverage_milestones "$ROOMSEG_COVERAGE_MILESTONES"
     )
 fi
 command=(
