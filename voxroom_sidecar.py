@@ -17,6 +17,7 @@ REQUIRED_INFO_KEYS = (
     "voxroom_camera_transform_world",
     "voxroom_geometry_contract",
 )
+TVARS_DOOR_SEGMENTS_COORDINATE_FRAME = "active_room_native_gt_map_rc_v1"
 
 
 def load_navigation_projection(path, expected_step, expected_shape):
@@ -400,6 +401,9 @@ class VoxRoomSidecarClient:
                 "tvars_door_segments_rc": np.asarray(
                     door_segments, dtype=np.int32
                 ).reshape(-1, 4),
+                "tvars_door_segments_coordinate_frame": np.asarray(
+                    TVARS_DOOR_SEGMENTS_COORDINATE_FRAME
+                ),
             }
         frame_path = self.frame_dir / "frame_{:06d}.npz".format(simulator_step)
         with frame_path.open("wb") as stream:
@@ -466,6 +470,9 @@ class VoxRoomSidecarClient:
         if self.coverage_eval:
             request["tvars_door_segments_rc"] = _door_segments_rc(
                 detected_doors
+            )
+            request["tvars_door_segments_coordinate_frame"] = (
+                TVARS_DOOR_SEGMENTS_COORDINATE_FRAME
             )
         self._send(request)
         result = self._read_response()
@@ -539,7 +546,10 @@ def _door_segments_rc(detected_doors):
         end = np.asarray(door["end"], dtype=np.int32).reshape(-1)
         if start.size != 2 or end.size != 2:
             raise ValueError("TVARS accepted door endpoints must be 2D")
+        # The dashboard transposes gt_map before plotting Active Room's (x, y)
+        # door endpoints. Coverage frames carry native, untransposed gt_map, so
+        # Active x is the native row and Active y is the native column.
         segments.append(
-            [int(start[1]), int(start[0]), int(end[1]), int(end[0])]
+            [int(start[0]), int(start[1]), int(end[0]), int(end[1])]
         )
     return segments

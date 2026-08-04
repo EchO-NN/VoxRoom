@@ -55,12 +55,12 @@ class VoxRoomGeometryTests(unittest.TestCase):
         ):
             _door_segments_rc(None)
 
-    def test_original_xy_door_endpoints_are_converted_to_row_col(self):
+    def test_dashboard_xy_door_endpoints_map_to_native_gt_map_row_col(self):
         segments = _door_segments_rc(
             [{"start": [17, 23], "end": [41, 29]}]
         )
 
-        self.assertEqual(segments, [[23, 17, 29, 41]])
+        self.assertEqual(segments, [[17, 23, 41, 29]])
 
     def test_active_room_keeps_native_mapping_pose_and_planner_pipeline(self):
         repository_root = Path(__file__).resolve().parents[1]
