@@ -1,0 +1,99 @@
+# ZED 2i -> VoxRoom direct real-sensor runtime.
+# Coordinate convention: x forward, y left, z up. Distances are meters.
+
+zed:
+  resolution: HD720
+  # HD720@60 reduces inter-frame motion for the rolling-shutter ZED 2i and
+  # gives visual-inertial tracking enough updates during turns.
+  fps: 60
+  depth_mode: NEURAL_LIGHT
+  depth_min_m: 0.20
+  depth_max_m: 3.00
+  depth_downsample: 1       # keep the native 1280x720 depth; voxel size is configured separately
+  depth_stabilization: 30
+  confidence_threshold: 50
+  texture_confidence_threshold: 100
+  sdk_verbose: false
+  serial_number: 0          # 0 = first connected ZED
+  svo_path: ""              # optional SVO/SVO2 replay path
+  svo_real_time_mode: false
+  tracking:
+    mode: GEN_3
+    enable_imu_fusion: true
+    set_gravity_as_origin: true
+    # Keep the SDK pose in full SE(3). VoxRoom projects only the navigation
+    # footprint to 2D; depth integration retains roll, pitch, and vertical motion.
+    enable_2d_ground_mode: false
+    # GEN_3 uses this map for loop closure, drift correction, and relocalization.
+    enable_area_memory: true
+    # Handheld mapping must keep a continuous odometry frame. Loop closure may
+    # update diagnostic WORLD pose, but must never reset online nvblox odometry.
+    reset_odom_with_loop_closure: false
+    enable_pose_smoothing: false
+    require_detailed_tracking_status: true
+    pose_continuity:
+      enabled: true
+      max_horizontal_speed_mps: 2.0
+      max_vertical_speed_mps: 1.0
+      max_angular_speed_deg_s: 180.0
+      horizontal_slack_m: 0.15
+      vertical_slack_m: 0.10
+      angular_slack_deg: 10.0
+      violation_timeout_s: 2.0
+    # The SDK's one-shot set_floor_as_origin accepted a false plane in testing.
+    # Keep it off and use the validated find_floor_plane gate below instead.
+    set_floor_as_origin: false
+    floor_alignment:
+      enabled: true
+      expected_camera_height_m: 1.15
+      # Handheld startup height may vary; accept only the plausible 0.30-2.00 m
+      # band, then still require stable height and normal across five frames.
+      height_tolerance_m: 0.85
+      min_consistent_detections: 5
+      max_height_spread_m: 0.05
+      min_abs_normal_z: 0.75
+      max_normal_deviation_deg: 4.0
+      timeout_s: 30.0
+    area_file_path: ""
+
+extrinsics:
+  # IMPORTANT: pose of the LEFT CAMERA FRAME expressed in base_link.
+  # Measure from base_link origin to the left optical center, not to the body
+  # center of the ZED housing. RPY uses Rz(yaw) @ Ry(pitch) @ Rx(roll).
+  base_to_left_camera_xyz_m: [0.00, 0.00, 1.15]
+  base_to_left_camera_rpy_deg: [0.0, 0.0, 0.0]
+
+mapping:
+  map_size_m: 20.0
+  resolution_m: 0.05
+  depth_min_m: 0.20
+  depth_max_m: 3.00
+  robot_radius_m: 0.20      # replace with your actual footprint radius
+  floor_z_m: 0.0            # fixed local-world floor used to index voxel layers
+
+runtime:
+  mode: full_voxel          # deployed default; use --mode smoke_2d for geometry-only checks
+  pose_mode: se3
+  output_dir: outputs/zed2i_real
+  mapping_hz: 5.0
+  capture:
+    # Positional tracking runs in a dedicated thread at the camera rate.
+    # Stop instead of corrupting the map when the sustained rate is too low.
+    minimum_tracking_fps: 45.0
+    fps_window_s: 3.0
+    low_fps_timeout_s: 2.0
+    open_timeout_s: 30.0
+  roomseg_every_s: 10.0
+  snapshot_every_s: 2.0
+  max_seconds: 0.0          # 0 = run until Ctrl+C / end of SVO
+  save_voxel_state: false   # true can produce a very large final NPZ
+  visualization:
+    enabled: true
+    required: true
+    update_hz: 5.0
+    window_name: VoxRoom ZED2i Live
+    panel_width: 1800
+    panel_height: 900
+    jpeg_quality: 82
+    map_min_span_m: 6.0
+    map_margin_m: 0.75

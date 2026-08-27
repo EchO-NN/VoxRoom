@@ -1,9 +1,35 @@
+# Python
 __pycache__/
 *.py[cod]
-.downloads/
-data/
-third_party/
-detr_door_detection/train_params/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data and outputs
+result/
 outputs/
-tmp/
+data/
+artifacts/
+*.npz
+*.npy
+*.pt
+*.pth
+*.svo
+*.svo2
+
+# Heavy external code/checkpoints
+external_baselines/*
+!external_baselines/README.md
+
+# Local environment
+.env
+.venv/
+venv/
+*.log
+.downloads/
 reproduction_install.json
+third_party/
+
+# Isaac / generated assets
+*.usd.tmp
+*.kit.log

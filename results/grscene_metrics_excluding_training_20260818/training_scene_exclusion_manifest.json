@@ -1,0 +1,36 @@
+{
+  "schema_version": "grscene_training_scene_exclusion_v1",
+  "created_at": "2026-08-18T11:21:13.786246+00:00",
+  "policy": "exclude every GRScene used in checkpoint training or validation",
+  "excluded_scene_count": 10,
+  "excluded_scene_ids": [
+    "kujiale_grscene_MV7J6NIKTKJZ2AABAAAAAEA8_usd",
+    "kujiale_grscene_MV7J6NIKTKJZ2AABAAAAAEI8_usd",
+    "kujiale_grscene_MVUCSQAKTKJ5EAABAAAAACA8_usd",
+    "kujiale_grscene_MVUCSQAKTKJ5EAABAAAAADQ8_usd",
+    "kujiale_grscene_MVUCSQAKTKJ5EAABAAAAAEA8_usd",
+    "kujiale_grscene_MVUHLWYKTKJ5EAABAAAAAAI8_usd",
+    "kujiale_grscene_MVUHLWYKTKJ5EAABAAAAACA8_usd",
+    "kujiale_grscene_MVUHLWYKTKJ5EAABAAAAADA8_usd",
+    "kujiale_grscene_MVUHLWYKTKJ5EAABAAAAADY8_usd",
+    "kujiale_grscene_MWBGLKQKTKJZ2AABAAAAABQ8_usd"
+  ],
+  "source_scene_list": "/media/echo/data/voxroom_roomseg_evaluation/grscene_all_available_gt_20260817/inputs/training_grscene_scene_ids.txt",
+  "source_scene_list_sha256": "d075c0e51363cad66fb398568993dd2a76da4a1ab7e0b361210633aea8bccf91",
+  "outputs": {
+    "voxroom": {
+      "index": "/media/echo/data/voxroom_roomseg_evaluation/grscene_all_available_gt_20260817/index_voxroom_excluding_training_grscenes.json",
+      "original_scenes": 68,
+      "kept_scenes": 58,
+      "original_checkpoints": 468,
+      "kept_checkpoints": 398
+    },
+    "tvars_original": {
+      "index": "/media/echo/data/voxroom_roomseg_evaluation/grscene_all_available_gt_20260817/index_tvars_original_excluding_training_grscenes.json",
+      "original_scenes": 68,
+      "kept_scenes": 58,
+      "original_checkpoints": 468,
+      "kept_checkpoints": 398
+    }
+  }
+}

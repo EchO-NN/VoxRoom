@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: "VoxRoom"
+message: "If you use VoxRoom, please cite the accompanying paper."
+type: software
+authors:
+  - family-names: "TBD"
+    given-names: "TBD"
+repository-code: "https://github.com/TBD/VoxRoom"
+version: "0.1.0"
+

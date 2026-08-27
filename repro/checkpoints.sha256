@@ -1,0 +1,4 @@
+# VoxRoom 19x19 local-3D + 41x41 2D-context, fixed threshold 0.5
+941d0f613326630f61a5287579830a2212bce908ddbe8c190bca2125f489f732  outputs/door_seed_training_runs/approved23_rot4_mirror1_vertical_20260813_1622/model_vertical_fixed0p5/best.pt
+# TVARS original DETR door detector
+d971e3b760421eb29665c1ca986854ce8ec57ddcc50209fcc77125c5e3cef7ec  external_baselines/Active_room_segmentation/detr_door_detection/train_params/detr_resnet50_4/final_doors_dataset/model.pth

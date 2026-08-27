@@ -1,0 +1,32 @@
+name: voxroom-online
+channels:
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - setuptools
+  - wheel
+  - numpy=1.26
+  - pyyaml
+  - pillow
+  - scipy
+  - matplotlib-base
+  - tqdm
+  - requests
+  - shapely
+  - pyzmq
+  - pytest
+  - numba
+  - scikit-image
+  - scikit-learn=1.6
+  - skan
+  - opencv
+  - open3d=0.19
+  - python-igraph=0.11
+  - treelib
+  - cuda-version=12.8
+  - cuda-libraries-dev=12.8.1
+  - pip:
+      - descartes
+      - scikit-fmm==2025.6.23

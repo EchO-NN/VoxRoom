@@ -1,0 +1,13 @@
+{
+  "exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "result",
+    "data/grscene_home_compat",
+    "data/grscene_home_compat_render_safe",
+    "data/grscene_home_episodes",
+    "data/grscene_home_preprocessed_radius005",
+    "data/interioragent_preprocessed_radius005",
+    "data/interioragent_episodes/radius005_all_scenes"
+  ]
+}
