@@ -28,13 +28,7 @@ cp configs/voxroom_online.yaml configs/voxroom.local.yaml
 
 Edit at least `paths.interioragent_root`, `dataset.root`, `paths.isaac_sim_root`, and `mapping.room_segmentation.door_seed_learning.checkpoint_path`. Put generated data and run outputs outside the source tree when storage is limited. The local configuration pattern is ignored by Git.
 
-The maintained checkpoint used in the separate archived main-method replay is the vertical epoch-14 model with SHA256:
-
-```text
-2e82fba43ab0d484bb7f73b5d752d9a2f7c270d65228eaebcdb77cd2d2c866d9
-```
-
-The checkpoint is **not included**, and the historical path in the template does not download it. The inference engine checks architecture, preprocessing, branch context, patch sizes, height scale/layers, and metadata. Recent source/config changes can make older source-hash checks fail. Do not disable all checks blindly: use a matching experiment checkout, a newly trained compatible model, or explicitly audit and document a permitted metadata exception. Do not silently fall back to rule-only seeds and label that run as the neural main method.
+Trained weights are **not included**. Provide your own compatible checkpoint through the local configuration. The inference engine checks architecture, preprocessing, branch context, patch sizes, height scale/layers, and metadata. Recent source/config changes can make older source-hash checks fail. Do not disable all checks blindly: use a matching experiment checkout, a newly trained compatible model, or explicitly audit and document a permitted metadata exception. Do not silently fall back to rule-only seeds and label that run as the neural main method.
 
 ## Scene preparation and a single-scene demo
 

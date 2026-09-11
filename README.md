@@ -92,7 +92,7 @@ python -m pip install -e '.[door-seed-learning]'
 
 Install a PyTorch/CUDA build compatible with your GPU and Isaac environment. The default mapping configuration uses the repository's `nvblox_fast_dda` integration path; installing this Python package alone does not install its external nvblox bindings. See [environment and data requirements](docs/reproduction.md).
 
-Before running, copy `configs/voxroom_online.yaml` to an untracked local configuration and set the dataset, Isaac Sim, and checkpoint paths. The historical checkpoint path in the template is not a downloadable model.
+Before running, copy `configs/voxroom_online.yaml` to an untracked local configuration and set the dataset, Isaac Sim, and checkpoint paths. Trained weights are not distributed with this repository; provide your own compatible checkpoint.
 
 ```bash
 cp configs/voxroom_online.yaml configs/voxroom.local.yaml

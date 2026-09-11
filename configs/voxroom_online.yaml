@@ -198,7 +198,7 @@ mapping:
       local_voxel_patch_size: 19
       context_patch_size: 41
       context_source: vertical  # vertical | nav
-      checkpoint_path: outputs/door_seed_training_runs/approved23_rot4_mirror1_vertical_20260813_1622/model_vertical_fixed0p5/best.pt
+      checkpoint_path: /path/to/your/compatible_checkpoint.pt  # set in the untracked local configuration
       device: cuda:0
       inference_batch_size: 32
       reuse_column_encodings: true  # inference only; identical column inputs share the Transformer output
