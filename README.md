@@ -4,7 +4,7 @@
 
 **Submitted to ICRA 2027 — Under Review.**
 
-**Project maintainer and code contributor:** [EchO-NN](https://github.com/EchO-NN) · [2579947814@qq.com](mailto:2579947814@qq.com)
+**Project maintainer and code contributor:** [EchO-NN](https://github.com/EchO-NN) · [echoni0507@gmail.com](mailto:echoni0507@gmail.com)
 
 [Pipeline](#pipeline) · [Demos](#demonstrations) · [Installation](#installation) · [Reproduction](docs/reproduction.md) · [Results](#evaluation) · [Method details](docs/method.md)
 
