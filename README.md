@@ -55,11 +55,11 @@ The following robot-side measurements were supplied by the project maintainer. *
 | SLAM and voxel mapping | FAST-LIO2 and point-cloud-to-voxel-map processing, including publishing/finalization | 54.52 | Multi-frame real-robot average |
 | Structural extraction | Voxel evidence, SFM / Vertical Free Map, rule-based 3D raw seeds, and constraints | 136.95 | Per archived-map stage evaluation |
 | 2D ray casting | TVARS-style planar ray casting and historical candidate merging | 42.48 | **Per invocation; invoked once per second (1 Hz)** |
-| FP16 neural verification | TensorRT FP16 inference, including input preparation and candidate filtering | 35.06 | Per archived-map stage evaluation; not per individual seed |
+| FP16 neural verification | TensorRT FP16 inference, including input preparation and candidate filtering | 355.06 | Per archived-map stage evaluation; not per individual seed |
 | Post-processing | Post-verification segmentation and room-property processing | 286.93 | Per archived-map stage evaluation |
-| **VoxRoom total (excluding SLAM / mapping)** | **Core total reported in the supplied timing record** | **821.42** | **Reported aggregate; see reconciliation note below** |
+| **VoxRoom total (excluding SLAM / mapping)** | **Structural extraction + 2D ray casting + FP16 neural verification + post-processing** | **821.42** | **Sum of the four VoxRoom stages, including one ray-casting invocation** |
 
-**Timing reconciliation:** the supplied record reports a VoxRoom total of **821.42 ms**, excluding the 54.52 ms SLAM/mapping stage. The four listed VoxRoom components sum to `136.95 + 42.48 + 35.06 + 286.93 = 501.42 ms`, leaving **320.00 ms not reconciled by the available breakdown**. We retain the reported total without inventing a missing stage or treating it as the sum of those four numbers. OctoMap-to-dense-array conversion and external navigation-projection preparation were **not separately timed**; the 320 ms difference is not assigned to them without evidence. These measurements do not establish a synchronized end-to-end latency or system frame rate. [Measurement notes](real_robot/README.md#latency-measurement-notes)
+**VoxRoom total:** `136.95 + 42.48 + 355.06 + 286.93 = 821.42 ms`, excluding the **54.52 ms** SLAM/mapping stage. The FP16 verification value is **355.06 ms**, as clarified by the project maintainer. OctoMap-to-dense-array conversion and external navigation-projection preparation were **not separately timed**. The module sum is not a synchronized end-to-end latency or system frame-rate measurement. [Measurement notes](real_robot/README.md#latency-measurement-notes)
 
 ## Entry-seed verifier
 
