@@ -8,7 +8,7 @@ The associated manuscript is under review for ICRA 2027. Software maintainership
 
 ## Earlier and third-party contributions
 
-The repository inherits earlier code and history, including work related to TVARS and Active Room Segmentation. The existing MIT notice for **B0GGY (2023)** is retained. Earlier commit authors remain in the history; they are not reassigned to the current maintainer.
+The repository includes earlier code and history related to TVARS and Active Room Segmentation. The maintainer confirmed that the historical commit identities belong to them and requested consolidation under **EchO-NN**, <2579947814@qq.com>. Commit author and committer identities have been normalized accordingly; this does not change the licensing or attribution of third-party code. The existing MIT notice for **B0GGY (2023)** is retained.
 
 TVARS-style 2D geometric candidate extraction is credited in the method documentation. Baseline adapters for TVARS, IPA room segmentation, DUDE, ROSE², Gomez-style methods, OccuSG, and SysNav do not transfer authorship or licensing of their external implementations to VoxRoom. Inspect each upstream source and license before redistributing it.
 
