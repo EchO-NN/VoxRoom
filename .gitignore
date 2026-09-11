@@ -7,6 +7,8 @@ __pycache__/
 
 # Runtime data and outputs
 result/
+/results/
+/docs/results/
 outputs/
 data/
 artifacts/
@@ -14,6 +16,11 @@ artifacts/
 *.npy
 *.pt
 *.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.plan
 *.svo
 *.svo2
 
@@ -23,6 +30,9 @@ external_baselines/*
 
 # Local environment
 .env
+.env.*
+!.env.example
+configs/*.local.yaml
 .venv/
 venv/
 *.log

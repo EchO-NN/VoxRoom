@@ -1,90 +1,77 @@
-# VoxRoom Method Notes
+# VoxRoom: implementation notes
 
-This document summarizes the implementation path used by the current paper
-repository.
+This document describes the maintained default implementation accompanying the ICRA 2027 submission. The manuscript calls the planar structural representation **Structural Free Map (SFM)**; code and debug arrays retain **Vertical Free Map** terminology.
 
-## 1. Online Voxel Mapping
+## Mapping and structural representation
 
-The robot receives RGB-D observations from Isaac Sim. Depth rays are integrated
-into a 3D voxel grid using DDA traversal.
+Posed sensor observations update a gravity-aligned 3D occupancy map. Observed free, occupied, and unobserved states remain distinct. The configured backend is `nvblox_fast_dda`; alternative integration paths in the repository are not automatically interchangeable experimental settings.
 
-For the paper configuration, a depth hit marks only the endpoint voxel itself:
+Column classification aggregates observed free evidence over height rather than requiring one uninterrupted traversable vertical interval. Strict wall and occluded-wall evidence provide structural barriers when free support is insufficient. Unknown evidence can participate in structural tests without rewriting the original unknown voxels as occupied.
 
-```yaml
-endpoint_splat_xy_radius_cells: 0
-endpoint_splat_z_radius_cells: 0
-```
+The SFM is a **structural representation**, not a safety certificate. The no-clearance navigation-free map is a separate projection; its furniture obstacles remain obstacles for motion planning. See `mapping/voxel_occupancy_door_wall_roomseg.py` and the voxel column classifiers in the same package.
 
-This means the endpoint update is 1x1 in the projected map. The older 3x3
-endpoint expansion is disabled.
+## Hybrid raw entry seeds
 
-## 2. Navigation Projection
+`door_seed_learning/hybrid_raw_seed.py` combines the existing voxel-derived candidates with TVARS-style planar ray candidates. Ray-length discontinuities suggest nearby opening endpoints; geometry constrains their pairing. Candidate lines are rasterized into the structural map.
 
-The voxel map is projected to 2D navigation layers:
+The combination is **OR**, not AND. A seed tagged by both sources still belongs to both for source-specific analyses. Ray candidates do not import TVARS visual accept/reject decisions, VoxRoom classifier predictions, or GT room labels. The classifier subsequently verifies the union.
 
-- navigation free,
-- navigation occupied,
-- navigation unknown.
+## Verifier architecture
 
-Door seed reasoning uses the no-clearance navigation free map rather than a
-clearance-dilated traversibility map. This keeps thin doorway evidence visible.
+Implemented in `door_seed_learning/model.py`:
 
-The endpoint hysteresis projection also uses no splat:
+| Stage | Layers / output |
+| --- | --- |
+| Voxel column | `[4,Z]`; Conv1d `4→40`, kernel 5; GroupNorm; GELU; residual Conv1d block |
+| Height relations | Two pre-norm Transformer layers, width 40, four heads, feed-forward width 120 |
+| Height aggregation | Mean and max pooling → 80 features per column |
+| Local XY layout | Assemble `[80,19,19]`; Conv2d `80→72`, residual block; stride-2 Conv2d `72→112`, residual block |
+| 3D branch output | Global spatial mean + max → 224 features |
+| SFM context | `[3,41,41]`; Conv2d `3→40`, residual block; stride-2 `40→72`, residual block; stride-2 `72→112`, residual block |
+| 2D branch output | Global spatial mean + max → 224 features |
+| Fused classifier | `448→160→40→1`, GELU/dropout between linear layers; sigmoid at inference |
 
-```yaml
-occupied_endpoint_xy_splat_radius_cells: 0
-occupied_endpoint_z_splat_radius_cells: 0
-```
+The first three voxel channels encode unknown, free, and occupied; the fourth encodes height relative to the common ground reference, normalized by a fixed scale. The context channels encode unknown, structural free, and occupied. Checkpoint metadata specifies the height discretization, preprocessing, and branch configuration.
 
-## 3. Wall Evidence
+### Inference-time column reuse
 
-The room-segmentation module derives wall-column evidence from voxel occupancy
-and vertical structure. Small wall gaps can be completed before door reasoning.
-This is a wall-column completion step, not the old wall-line extension stage.
+`door_seed_learning/column_encoding_cache.py` and `inference.py` avoid repeatedly encoding columns shared by overlapping 19×19 patches. The cache stores per-column descriptors, not seed probabilities. Each candidate gathers those descriptors in its own XY order before the unchanged local CNN and context branch run.
 
-## 4. Door Seed Detection
+Cache lookup depends on the encoded column content and relevant model/input conditions. Changed states or height/model signatures invalidate reuse. The default CPU cache is bounded at 65,536 columns; encoding batches are limited to 2,048 columns. No entire-map feature tensor is required on the GPU.
 
-Door seeds are detected from narrow navigation-free bands with supporting
-occupied or out-of-range upper evidence near the estimated ceiling. The current
-height rule uses:
+The mathematical operation is unchanged; GPU batch shapes and floating-point kernels can yield small numerical differences. Regression tests check tolerances and classification decisions, rather than claiming bitwise equality. Training uses the normal differentiable model path.
 
-```text
-door_seed_height = 0.95 * estimated_ceiling_height
-```
+## Separators and room labels
 
-The default ceiling estimator selects the dominant occupied z layer above the
-lower height cutoff. The Scioto scene override instead scans every XY voxel
-column from top to bottom, keeps the first occupied voxel in each non-empty
-column, and uses the arithmetic mean of all those heights. Each column
-therefore contributes exactly one sample, including columns over stairs and
-low structures.
-
-## 5. Door Completion
-
-Door seed clusters are grouped, bridged along the same line when allowed, and
-checked with geometric line constraints. The accepted door completion lines are
-then used as room separators.
-
-The current method keeps the linear shape constraints and stateful door memory.
-Once a door line has become a stable partition, later fragmented raw seeds do
-not immediately delete or replace it. Stable door geometry is recomputed only
-when the ceiling estimate changes enough to invalidate the seed-height test.
-
-## 6. No Wall-Line Extension
-
-The old second-stage wall-line extension is disabled:
+Verified seeds are grouped into geometric support sets. Fitted linear primitives are checked for correlation, orthogonal variance, support, continuity, thickness, and surrounding geometry. Accepted door candidates contribute separators; persistent door memory stabilizes established partitions as observations change. The release defaults are:
 
 ```yaml
-voxel_step2:
-  enabled: false
+door_seed_learning:
+  keep_threshold: 0.5
+  context_source: vertical
+  raw_seed_source: voxroom_tvars_vertical_union
+  reuse_column_encodings: true
+voxel_door:
+  primitive_min_line_correlation: 0.95
+  primitive_max_orthogonal_variance_cells2: 0.65
+  enable_l_shaped_seed_branches: false
 ```
 
-This is important: room partitions are produced by completed door lines, not by
-extending wall lines across free space.
+These keys are nested under `mapping.room_segmentation`. The variance is measured in **grid cells squared**, not square meters. L-shaped dual-arm fitting remains an explicit experimental option, not the default algorithm.
 
-## 7. Room Partition
+Connected components of structural-free space separated by the accepted cuts produce room labels. Labels are then projected/aligned onto navigation space. Separators are virtual instance boundaries: they must not overwrite the physical navigation occupancy map.
 
-Accepted door lines are rasterized into the room segmentation map. Connected
-components in the explored free-space domain become room masks. The runtime
-saves snapshot `.npz` files with both intermediate evidence layers and final
-room labels.
+## Rendering versus evaluation
+
+Room colors are categorical presentation choices, not semantic classes. A matched palette across methods does not merge their predicted labels. Unknown regions remain unassigned; navigation obstacles and structural-free regions should not be conflated.
+
+The metric pipeline consumes integer room-label arrays on the frozen evaluation domain. Recoloring, image cropping, and other publication-figure presentation operations are not part of metric computation. Use saved raw predictions and explicit reference masks when reproducing scores; do not evaluate screenshots.
+
+## References to code
+
+- [Column/door geometry](../voxroom_online/isaac_runtime/mapping/voxel_door_detector.py)
+- [Room-segmentation pipeline](../voxroom_online/isaac_runtime/mapping/voxel_occupancy_door_wall_roomseg.py)
+- [Hybrid candidates](../voxroom_online/isaac_runtime/door_seed_learning/hybrid_raw_seed.py)
+- [Network](../voxroom_online/isaac_runtime/door_seed_learning/model.py)
+- [Inference and compatibility checks](../voxroom_online/isaac_runtime/door_seed_learning/inference.py)
+- [Overlap metrics](../voxroom_online/isaac_runtime/evaluation/online_roomseg/metrics.py)

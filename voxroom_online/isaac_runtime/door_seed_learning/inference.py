@@ -10,6 +10,7 @@ from typing import Mapping
 import numpy as np
 
 from voxroom_online.isaac_runtime.door_seed_learning.config import DoorSeedLearningConfig
+from voxroom_online.isaac_runtime.door_seed_learning.column_encoding_cache import ColumnEncodingCache
 from voxroom_online.isaac_runtime.door_seed_learning.model import (
     MODEL_ARCHITECTURE_VERSION,
     PREPROCESSOR_VERSION,
@@ -56,6 +57,11 @@ class DoorSeedInferenceEngine:
         self.load_error: str | None = None
         self.fallback_count = 0
         self.inference_count = 0
+        self.column_cache = ColumnEncodingCache(
+            max_columns=self.config.column_encoding_cache_size,
+            batch_size=self.config.column_encoding_batch_size,
+        )
+        self.last_column_cache_stats: dict[str, object] = {}
         try:
             self._load()
         except Exception as exc:
@@ -72,6 +78,7 @@ class DoorSeedInferenceEngine:
         seed_connectivity: int,
     ) -> DoorSeedFilterOutput:
         started_at = time.perf_counter()
+        self.last_column_cache_stats = {}
         raw_result = stage.raw_seed_result
         raw_mask = np.asarray(stage.raw_seed_mask_xy, dtype=bool)
         probability_xy = np.full(raw_mask.shape, np.nan, dtype=np.float32)
@@ -96,10 +103,15 @@ class DoorSeedInferenceEngine:
                     "voxel_door_seed_model_latency_ms": 0.0,
                 })
                 return DoorSeedFilterOutput(result, probability_xy, np.asarray(stage.raw_seed_mask_xy, dtype=bool), np.zeros(raw_mask.shape, dtype=bool), None, 0.0)
-            voxel_patches, _valid = extract_local_voxel_patches(
-                voxel_grid.state,
-                rc,
-                patch_size=int(self.config.local_voxel_patch_size),
+            use_voxel_branch = bool(self.model.model_config.use_voxel_branch)
+            voxel_patches = (
+                extract_local_voxel_patches(
+                    voxel_grid.state,
+                    rc,
+                    patch_size=int(self.config.local_voxel_patch_size),
+                )[0]
+                if use_voxel_branch and bool(self.config.keep_uninformative_seed)
+                else None
             )
             context_map = stage.vertical_class_map_xy if self.config.context_source == "vertical" else stage.nav_class_map_xy
             self._validate_runtime_metadata(
@@ -112,6 +124,7 @@ class DoorSeedInferenceEngine:
             )
             probabilities = self.predict_arrays(
                 voxel_state_nzyx=voxel_patches,
+                voxel_state_zyx=voxel_grid.state if use_voxel_branch and voxel_patches is None else None,
                 z_centers_m=np.asarray(voxel_grid.z_centers_m, dtype=np.float32),
                 class_map_xy=np.asarray(context_map, dtype=np.uint8),
                 seed_rc=rc,
@@ -122,7 +135,7 @@ class DoorSeedInferenceEngine:
                 context_patches = extract_class_patches(context_map, rc, patch_size=int(self.config.context_patch_size))
                 uninformative = np.asarray(
                     [
-                        observed_ratio(voxel_patches[index], context_patches[index])
+                        observed_ratio(voxel_patches[index] if voxel_patches is not None else np.empty(0, dtype=np.uint8), context_patches[index])
                         < float(self.config.uninformative_observed_ratio_min)
                         for index in range(len(rc))
                     ],
@@ -151,6 +164,7 @@ class DoorSeedInferenceEngine:
                     "voxel_door_seed_model_checkpoint": str(self.config.checkpoint_path),
                     "voxel_door_seed_model_inference_count": int(self.inference_count + 1),
                     "voxel_door_seed_model_fallback_count": int(self.fallback_count),
+                    "voxel_door_seed_model_column_cache": dict(self.last_column_cache_stats),
                 }
             )
             self.inference_count += 1
@@ -179,43 +193,71 @@ class DoorSeedInferenceEngine:
     def predict_arrays(
         self,
         *,
-        voxel_state_nzyx: np.ndarray,
+        voxel_state_nzyx: np.ndarray | None = None,
         z_centers_m: np.ndarray,
         class_map_xy: np.ndarray,
         seed_rc: np.ndarray,
+        voxel_state_zyx: np.ndarray | None = None,
     ) -> np.ndarray:
         import torch
 
         if self.model is None or self.device is None:
             raise RuntimeError("door seed model is not loaded")
-        voxel = np.asarray(voxel_state_nzyx, dtype=np.uint8)
         rc = sorted_seed_coordinates(seed_rc)
-        if voxel.shape[0] != len(rc):
+        use_voxel_branch = bool(self.model.model_config.use_voxel_branch)
+        use_context_branch = bool(self.model.model_config.use_context_branch)
+        voxel = None if voxel_state_nzyx is None else np.asarray(voxel_state_nzyx, dtype=np.uint8)
+        if voxel is not None and voxel.shape[0] != len(rc):
             raise ValueError("voxel patch count does not match raw seed coordinates")
-        context = extract_class_patches(class_map_xy, rc, patch_size=int(self.config.context_patch_size))
+        if use_voxel_branch and (voxel is None) == (voxel_state_zyx is None):
+            raise ValueError("supply either voxel patches or one full voxel grid")
         output = np.empty((len(rc),), dtype=np.float32)
         self.model.eval()
+        reuse_columns = bool(self.config.reuse_column_encodings) and use_voxel_branch
+        self.last_column_cache_stats = {"enabled": reuse_columns}
         with torch.inference_mode():
+            if reuse_columns:
+                self.column_cache.start_call(self.model, z_centers_m, float(self.config.height_scale_m))
             for start in range(0, len(rc), int(self.config.inference_batch_size)):
                 end = min(len(rc), start + int(self.config.inference_batch_size))
-                voxel_channels = voxel_states_to_model_channels(
-                    voxel[start:end],
-                    z_centers_m,
-                    height_scale_m=float(self.config.height_scale_m),
+                patches = None
+                if use_voxel_branch:
+                    patches = (voxel[start:end] if voxel is not None else extract_local_voxel_patches(
+                        voxel_state_zyx, rc[start:end], patch_size=int(self.config.local_voxel_patch_size),
+                    )[0])
+                context_channels = (
+                    class_patches_to_one_hot(extract_class_patches(
+                        class_map_xy, rc[start:end], patch_size=int(self.config.context_patch_size),
+                    )) if use_context_branch else np.empty((end - start, 0), dtype=np.float32)
                 )
-                context_channels = class_patches_to_one_hot(context[start:end])
-                logits = self.model(
-                    torch.from_numpy(voxel_channels).to(self.device, non_blocking=True),
-                    torch.from_numpy(context_channels).to(self.device, non_blocking=True),
-                )
+                context_tensor = torch.from_numpy(context_channels).to(self.device, non_blocking=True)
+                if reuse_columns:
+                    local_map = self.column_cache.encode_patches(
+                        self.model, patches, z_centers_m, float(self.config.height_scale_m),
+                    )
+                    logits = self.model.forward_encoded(local_map, context_tensor)
+                else:
+                    logits = self.model(
+                        torch.from_numpy(voxel_states_to_model_channels(
+                            patches, z_centers_m, height_scale_m=float(self.config.height_scale_m),
+                        ) if use_voxel_branch else np.empty((end - start, 0), dtype=np.float32)).to(self.device, non_blocking=True),
+                        context_tensor,
+                    )
                 if logits.shape != (end - start, 1):
                     raise RuntimeError("door seed model must output [B,1]")
                 if not torch.all(torch.isfinite(logits)):
                     raise RuntimeError("door seed model produced NaN or Inf logits")
                 output[start:end] = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
+            if reuse_columns:
+                self.last_column_cache_stats.update(self.column_cache.statistics())
         if not np.all(np.isfinite(output)):
             raise RuntimeError("door seed model produced non-finite probabilities")
         return output
+
+    def clear_column_cache(self) -> None:
+        """Explicit reset, e.g. after custom parameter mutation bypassing torch versions."""
+        self.column_cache.clear()
+        self.last_column_cache_stats = {}
 
     @property
     def keep_threshold(self) -> float:
@@ -298,7 +340,11 @@ class DoorSeedInferenceEngine:
                 raise ValueError("door seed checkpoint %s must be in [0,1]" % key)
         source_hash = str(checkpoint["source_code_hash"])
         current_source_hash = source_tree_hash(Path(__file__).resolve().parent)
-        if not source_hash or source_hash != current_source_hash:
+        if (
+            (not source_hash or source_hash != current_source_hash)
+            and not bool(self.config.allow_source_code_hash_mismatch)
+            and not bool(self.config.ablation_allow_checkpoint_mismatch)
+        ):
             raise ValueError("door seed checkpoint source_code_hash mismatch")
         model = build_door_seed_model(model_cfg)
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
@@ -310,6 +356,7 @@ class DoorSeedInferenceEngine:
         self.model = model
         self.checkpoint = checkpoint
         self.device = device
+        self.clear_column_cache()
         _ = self.keep_threshold
 
     def _validate_runtime_metadata(
@@ -336,6 +383,12 @@ class DoorSeedInferenceEngine:
             (str(input_semantics_hash) == str(checkpoint["input_semantics_hash"]), "input_semantics_hash"),
         )
         failed = [name for passed, name in checks if not passed]
+        if bool(self.config.ablation_allow_checkpoint_mismatch):
+            failed = [
+                name
+                for name in failed
+                if name not in {"raw_seed_config_hash", "input_semantics_hash"}
+            ]
         if failed:
             raise ValueError("door seed checkpoint runtime metadata mismatch: %s" % ", ".join(failed))
 

@@ -73,17 +73,29 @@ class VoxroomTvarsRawSeedAccumulator:
         if vertical_free.shape != shape or vertical_wall.shape != shape:
             raise ValueError("Vertical Free layers do not match the stage map")
         vertical_unknown = ~(vertical_free | vertical_wall)
-        reconstructed = reconstruct_hough_raw_door_seed(
-            obstacle_mask=vertical_wall,
-            unknown_mask=vertical_unknown,
-            agent_rc=(int(agent_rc[0]), int(agent_rc[1])),
-            yaw_deg=float(yaw_deg),
-            resolution_m=float(resolution_m),
-            seed_width_cells=int(self.config.tvars_seed_width_cells),
+        needs_tvars = self.config.raw_seed_source in {
+            "tvars_vertical",
+            "voxroom_tvars_vertical_union",
+        }
+        reconstructed = (
+            reconstruct_hough_raw_door_seed(
+                obstacle_mask=vertical_wall,
+                unknown_mask=vertical_unknown,
+                agent_rc=(int(agent_rc[0]), int(agent_rc[1])),
+                yaw_deg=float(yaw_deg),
+                resolution_m=float(resolution_m),
+                seed_width_cells=int(self.config.tvars_seed_width_cells),
+            )
+            if needs_tvars
+            else None
         )
         outside = np.asarray(stage.outside_boundary_mask_xy, dtype=bool)
         current_voxroom &= ~outside
-        current_tvars = np.asarray(reconstructed.raw_seed_mask, dtype=bool) & ~outside
+        current_tvars = (
+            np.asarray(reconstructed.raw_seed_mask, dtype=bool) & ~outside
+            if reconstructed is not None
+            else np.zeros(shape, dtype=bool)
+        )
 
         if self._voxroom_history is None:
             self._voxroom_history = np.zeros(shape, dtype=bool)
@@ -98,8 +110,16 @@ class VoxroomTvarsRawSeedAccumulator:
         persistent_union = self._voxroom_history | self._tvars_history
         use_persistent_final = bool(final and self.config.persistent_final_raw_seed_union)
         use_persistent = bool(use_history or use_persistent_final)
-        selected_union = persistent_union if use_persistent else current_union
-        seed_hash = config_hash(
+        source = str(self.config.raw_seed_source)
+        if source == "voxroom":
+            selected_union = self._voxroom_history if use_persistent else current_voxroom
+        elif source == "tvars_vertical":
+            selected_union = self._tvars_history if use_persistent else current_tvars
+        elif source == "vertical_free_all":
+            selected_union = vertical_free & ~outside
+        else:
+            selected_union = persistent_union if use_persistent else current_union
+        seed_contract = (
             {
                 "algorithm": "voxroom_tvars_vertical_raw_seed_union_v1",
                 "voxroom_raw_seed_config_hash": str(stage.raw_seed_config_hash),
@@ -110,11 +130,24 @@ class VoxroomTvarsRawSeedAccumulator:
                     self.config.persistent_final_raw_seed_union
                 ),
             }
+            if source == "voxroom_tvars_vertical_union"
+            else {
+                "algorithm": "voxroom_raw_seed_ablation_selector_v1",
+                "selected_source": source,
+                "voxroom_raw_seed_config_hash": str(stage.raw_seed_config_hash),
+                "tvars_algorithm": "original_360deg_range_jump_then_prefilter_pairing",
+                "tvars_input": "voxel_vertical_free_wall_unknown",
+                "tvars_seed_width_cells": int(self.config.tvars_seed_width_cells),
+                "persistent_final_raw_seed_union": bool(
+                    self.config.persistent_final_raw_seed_union
+                ),
+            }
         )
+        seed_hash = config_hash(seed_contract)
         semantics_hash = config_hash(
             {
                 "base_input_semantics_hash": str(stage.input_semantics_hash),
-                "raw_seed_source": "voxroom_tvars_vertical_union",
+                "raw_seed_source": source,
                 "nonfinal_union_scope": (
                     "episode_history"
                     if self.config.save_full_voxel_milestones
@@ -131,7 +164,7 @@ class VoxroomTvarsRawSeedAccumulator:
         )
         debug = {
             **dict(stage.debug),
-            "raw_seed_source": "voxroom_tvars_vertical_union",
+            "raw_seed_source": source,
             "raw_seed_union_scope": "episode_history" if use_persistent else "current_decision",
             "raw_seed_union_decision_count": int(self.decision_count),
             "voxroom_raw_seed_cells_current": int(np.count_nonzero(current_voxroom)),
@@ -140,7 +173,9 @@ class VoxroomTvarsRawSeedAccumulator:
             "voxroom_raw_seed_cells_history": int(np.count_nonzero(self._voxroom_history)),
             "tvars_vertical_raw_seed_cells_history": int(np.count_nonzero(self._tvars_history)),
             "raw_seed_cells_history_union": int(np.count_nonzero(persistent_union)),
-            "tvars_vertical_raw_seed_debug": dict(reconstructed.debug),
+            "tvars_vertical_raw_seed_debug": (
+                dict(reconstructed.debug) if reconstructed is not None else {}
+            ),
             "voxroom_raw_seed_mask": current_voxroom.copy(),
             "tvars_vertical_raw_seed_mask": current_tvars.copy(),
             "raw_seed_union_mask": selected_union.copy(),

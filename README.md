@@ -1,123 +1,236 @@
 # VoxRoom
 
-本仓库是 2026-08-18 GRScene 实验对应的精简代码发布版。旧版
-`Active_room_segmentation` 工作树已经被 VoxRoom 当前算法替换，但历史提交仍然保留，
-用于复现 TVARS 原版基线。
+## Room Segmentation from Partial Observations during Robot Exploration
 
-## 本次发布包含什么
+**Submitted to ICRA 2027 — Under Review.** This is a submission, not an accepted publication.
 
-- VoxRoom 在线三维体素建图、Vertical Free Map 和 Nav Free Map 投影；
-- VoxRoom 与 TVARS-style Vertical Hough 两类 raw door seed 的并集；
-- `19x19` 局部三维编码、`41x41` 二维上下文编码和固定 `0.5` 阈值推理；
-- 持久门线、基于 Vertical Free Map 的房间分割与前沿探索；
-- Isaac Sim / GRScene 批量运行器；
-- 严格 TVARS 原版适配器；
-- P、R、F1 和 room mIoU 评测程序；
-- 上一次实验的汇总表、逐场景/逐检查点指标和源码哈希清单。
+**Project maintainer and code contributor:** [EchO-NN](https://github.com/EchO-NN) · [2579947814@qq.com](mailto:2579947814@qq.com)
 
-仓库没有上传 GRScene/InteriorAgent/Habitat 场景、人工标注图、体素快照、运行日志和
-大模型权重。它们不是代码，并且部分内容受数据集许可或 GitHub 单文件大小限制。
+[Pipeline](#pipeline) · [Demos](#demonstrations) · [Installation](#installation) · [Reproduction](docs/reproduction.md) · [Results](#evaluation) · [Method details](docs/method.md)
 
-## 上一次实验结果
+VoxRoom incrementally segments rooms from the **partial 3D occupancy observations** available during robot exploration. Instead of waiting for a complete floor plan, it combines voxel-column height structure with a wider planar context to verify room-entry evidence and construct room separators. Unobserved space remains unassigned.
 
-完整数据表见 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md)，机器可读汇总见
-[`results/grscene_20260818_aggregate.csv`](results/grscene_20260818_aggregate.csv)。
+## Pipeline
 
-在排除参与门种子网络训练的 10 个 GRScene 后，final 结果为：
+[![VoxRoom pipeline: voxel mapping, structural extraction, learned entry-seed verification, and room segmentation](docs/assets/pipeline.png)](docs/assets/pipeline.pdf)
 
-| 方法 | 场景数 | P (%) | R (%) | F1 (%) | room mIoU (%) |
-|---|---:|---:|---:|---:|---:|
-| VoxRoom | 58 | 94.298 | 95.035 | 94.431 | 73.411 |
-| TVARS | 58 | 89.086 | 96.769 | 92.567 | 58.031 |
+[Download the original vector PDF](docs/assets/pipeline.pdf).
 
-## 固定实验条件
+1. **Voxel mapping.** Integrate posed observations into a gravity-aligned occupancy grid with free, occupied, and unknown states.
+2. **Structural extraction.** Aggregate free-space evidence along voxel columns into a **Structural Free Map (SFM)**. Combine candidates from 3D height-pattern screening and 2D ray-length discontinuities using a union, retaining candidates discovered by either source.
+3. **Learned entry-seed verification.** Jointly encode a local **19 × 19 × Z voxel patch** and a **41 × 41 SFM context** to estimate an entry probability for each candidate.
+4. **Room segmentation.** Cluster verified seeds, fit and geometrically validate line segments, maintain stable separators, and label connected structural-free regions. Project the resulting room labels onto the navigation-free map.
 
-- 地图分辨率：`0.05 m/cell`；
-- 小房间过滤：面积小于 `0.5 m²`；
-- 分割来源：`voxel_vertical_free_xy`；
-- 探索检查点：20%、40%、60%、70%、80%、90% 和 final；
-- VoxRoom checkpoint SHA256：
-  `941d0f613326630f61a5287579830a2212bce908ddbe8c190bca2125f489f732`；
-- TVARS DETR checkpoint SHA256：
-  `d971e3b760421eb29665c1ca986854ce8ec57ddcc50209fcc77125c5e3cef7ec`；
-- TVARS 原版源码提交：
-  `c6dbe92c55ea34f9710ddcc5b10d59144662fe68`；
-- 主配置 SHA256：
-  `ddc1f76daed49bac8d6d998c0a8a6ccbef21df1086af89762cef598d4793568c`。
+**Terminology:** the manuscript calls the representation *Structural Free Map*; the implementation retains the earlier names `Vertical Free Map`, `context_source: vertical`, and `voxel_vertical_free_xy`. It is not the collision map: furniture can interrupt traversability while free observations at other heights still support structural connectivity. Virtual room separators do not make doorways physically occupied.
 
-权重的期望路径和完整校验值记录在 [`repro/checkpoints.sha256`](repro/checkpoints.sha256)。
+## Demonstrations
 
-## 环境
+### Simulation — Isaac Sim / InteriorAgent
 
-正式在线实验使用：
+[![VoxRoom simulation, 10× playback](docs/assets/simulation_preview.gif)](docs/assets/voxroom_simulation_10x.mp4)
 
-- Linux；
-- Python 3.11；
-- Isaac Sim standalone 5.1.0；
-- NVIDIA GPU；
-- GRScene/InteriorAgent 场景资产；
-- 独立的 TVARS Python 环境。
+[Watch / download the full MP4](docs/assets/voxroom_simulation_10x.mp4) · [Browser demo page](docs/index.html)
 
-创建 VoxRoom 环境：
+The supplied recording shows `kujiale_0003`: RGB, depth, navigation-space room masks, and the Vertical Free Map during exploration. The MP4 is **10× playback**, 2200 × 1400 pixels, and approximately 14.2 seconds long. The GIF is a smaller preview of that same clip. This is a qualitative demonstration, not an additional held-out test episode or a wall-clock inference benchmark.
+
+For a playable HTML page, open `docs/index.html` in a browser or run `python -m http.server 8000` and visit `http://localhost:8000/docs/`. GitHub's README shows the GIF and links to the MP4; it does not need an external video host.
+
+### Real-world robot — Coming soon
+
+**A dedicated real-world demonstration video and deployment code will be added here.** No real-world video or segmentation-quality benchmark is included yet. The [demo page](docs/index.html#real-world) reserves a separate section, and [`real_robot/`](real_robot/README.md) reserves the deployment-code entry point. The measurements below describe the separate robot-side implementation; they do not imply that its FAST-LIO2/TensorRT integration has already been released. See [the media guide](docs/assets/README.md) for the future recording.
+
+### Real-world hardware and module latency
+
+| Component | Platform |
+| --- | --- |
+| 3D LiDAR | PACECAT (蓝海光电) LDS_M200_E |
+| RGB monitoring camera | DJI Osmo Action 4; used for viewpoint monitoring, not as the SLAM sensor |
+| Mobile base | Circular, two-wheel differential-drive platform |
+| Onboard computer | Intel Core Ultra 9 275HX + NVIDIA GeForce RTX 5070 Laptop GPU; computer carried on the base |
+
+The following robot-side measurements were supplied by the project maintainer. **All durations are in milliseconds.** SLAM is a multi-frame real-robot average; the VoxRoom stages are module measurements on one archived map, not averages over the simulation test set.
+
+| Stage | Included work | Time (ms) | Measurement / scheduling |
+| --- | --- | ---: | --- |
+| SLAM and voxel mapping | FAST-LIO2 and point-cloud-to-voxel-map processing, including publishing/finalization | 54.52 | Multi-frame real-robot average |
+| Structural extraction | Voxel evidence, SFM / Vertical Free Map, rule-based 3D raw seeds, and constraints | 136.95 | Per archived-map stage evaluation |
+| 2D ray casting | TVARS-style planar ray casting and historical candidate merging | 42.48 | **Per invocation; invoked once per second (1 Hz)** |
+| FP16 neural verification | TensorRT FP16 inference, including input preparation and candidate filtering | 35.06 | Per archived-map stage evaluation; not per individual seed |
+| Post-processing | Post-verification segmentation and room-property processing | 286.93 | Per archived-map stage evaluation |
+| **VoxRoom total (excluding SLAM / mapping)** | **Core total reported in the supplied timing record** | **821.42** | **Reported aggregate; see reconciliation note below** |
+
+**Timing reconciliation:** the supplied record reports a VoxRoom total of **821.42 ms**, excluding the 54.52 ms SLAM/mapping stage. The four listed VoxRoom components sum to `136.95 + 42.48 + 35.06 + 286.93 = 501.42 ms`, leaving **320.00 ms not reconciled by the available breakdown**. We retain the reported total without inventing a missing stage or treating it as the sum of those four numbers. OctoMap-to-dense-array conversion and external navigation-projection preparation were **not separately timed**; the 320 ms difference is not assigned to them without evidence. These measurements do not establish a synchronized end-to-end latency or system frame rate. [Measurement notes](real_robot/README.md#latency-measurement-notes)
+
+## Entry-seed verifier
+
+| Component | Representation / operation |
+| --- | --- |
+| Local input | `B × 4 × Z × 19 × 19`: unknown, free, occupied, and normalized absolute height |
+| Per-column encoder | Shared 1D CNN, followed by two Transformer layers with four attention heads and width 40 |
+| Column pooling | Mean + max over height → 80 features per column |
+| Local spatial encoder | Reassemble `B × 80 × 19 × 19`; residual 2D CNN and spatial mean + max pooling → 224 features |
+| Context input | `B × 3 × 41 × 41`: unknown, structural free, and occupied |
+| Context encoder | Residual 2D CNN and spatial mean + max pooling → 224 features |
+| Fusion | Concatenate → 448; MLP `448 → 160 → 40 → 1`; sigmoid |
+| Decision | Keep candidates with `p ≥ 0.5` |
+
+At 0.05 m resolution, the patches span 0.95 × 0.95 m and 2.05 × 2.05 m. `Z` must match the checkpoint and voxel height discretization; it is not an additional horizontal patch size.
+
+The release also includes **inference-time voxel-column encoding reuse**: identical column inputs share their CNN/Transformer encoding, and cached descriptors are gathered back into each candidate's local XY patch. This does not retrain the network or cache final room decisions. Cache entries are bounded and invalidated when input or model conditions change; see [implementation details](docs/method.md#inference-time-column-reuse).
+
+## Installation
+
+The simulation workflow uses Linux, Python 3.11, NVIDIA Isaac Sim standalone **5.1.0**, and an NVIDIA GPU. Scene assets, Isaac Sim, the selected occupancy-mapping backend, and trained checkpoints are external dependencies, not bundled downloads.
 
 ```bash
-scripts/setup_voxroom_env.sh
+git clone https://github.com/EchO-NN/VoxRoom.git
+cd VoxRoom
+bash scripts/setup_voxroom_env.sh
 source scripts/activate_voxroom_env.sh
-python -m pip install -e .
+python -m pip install -e '.[door-seed-learning]'
 ```
 
-主配置位于 [`configs/voxroom_online.yaml`](configs/voxroom_online.yaml)。先修改其中的
-Isaac Sim、数据集和 checkpoint 路径。
+Install a PyTorch/CUDA build compatible with your GPU and Isaac environment. The default mapping configuration uses the repository's `nvblox_fast_dda` integration path; installing this Python package alone does not install its external nvblox bindings. See [environment and data requirements](docs/reproduction.md).
 
-## 恢复严格 TVARS 基线
-
-本次实验要求 TVARS 源码恰好位于历史提交 `c6dbe92`，且工作树干净。当前仓库保留了
-该提交的历史，因此可以直接建立 worktree：
+Before running, copy `configs/voxroom_online.yaml` to an untracked local configuration and set the dataset, Isaac Sim, and checkpoint paths. The historical checkpoint path in the template is not a downloadable model.
 
 ```bash
-git worktree add external_baselines/Active_room_segmentation \
-  c6dbe92c55ea34f9710ddcc5b10d59144662fe68
+cp configs/voxroom_online.yaml configs/voxroom.local.yaml
+# Edit paths and mapping.room_segmentation.door_seed_learning.checkpoint_path.
+export ISAAC_ROOT=/path/to/isaac-sim-standalone-5.1.0-linux-x86_64
+
+CONFIG=configs/voxroom.local.yaml \
+RUN_DIR=result/my_scene \
+bash scripts/run_one_scene_random_frontier.sh /path/to/scene_episode.jsonl
 ```
 
-然后把 TVARS DETR 权重放在：
+This command runs a **random-frontier demonstration**. It is not, by itself, the paired baseline-evaluation protocol used for the reported table. Scene preprocessing, training, evaluation, checkpoint compatibility, and optional baseline setup are covered in [the reproduction guide](docs/reproduction.md).
+
+## Training
+
+The released tools support candidate collection, final-map annotation, label back-projection to historical snapshots, scene-level splitting, deduplication, and joint 2D/3D training. Apply the same spatial augmentation to both inputs; never split augmented copies of one scene across train/validation/test.
+
+```bash
+bash scripts/build_door_seed_dataset.sh \
+  --collection-root /path/to/approved_collections \
+  --split-file /path/to/scene_split.json \
+  --out-dir data/door_seed_dataset
+
+bash scripts/train_door_seed_classifier.sh \
+  --index data/door_seed_dataset/dataset_vertical.jsonl \
+  --out-dir outputs/door_seed_training \
+  --context-source vertical \
+  --checkpoint-selection-mode fixed_f1 \
+  --threshold-selection-mode fixed --fixed-keep-threshold 0.5 \
+  --train-rotation-degrees 0,90,180,270 --train-mirror-lr-once
+```
+
+These are training entry points, not a promise that a new run reproduces an existing checkpoint. The additional single left-right mirror is an explicit supported option. The main inference configuration retains line correlation **0.95**, orthogonal variance **0.65 cells²**, NN threshold **0.5**, and the experimental L-shaped dual-arm handling **disabled**.
+
+## Evaluation
+
+The following results are **reported in the supplied manuscript**, evaluated on InteriorAgent and GRScene under the shared-exploration protocol. Values are transcribed from the paper's tables, in percent, rather than recomputed from a different archived run. Training and model-selection scenes are excluded from the paper's test protocol.
+
+### Comparison with other methods — Table I, Average
+
+| Method | P ↑ | R ↑ | F1 ↑ | room-mIoU ↑ |
+| --- | ---: | ---: | ---: | ---: |
+| Gomez-reprod. | 92.8 | 87.7 | 89.6 | 64.4 |
+| DUDE (Incremental) | 83.5 | 71.2 | 76.3 | 41.2 |
+| DUDE (Snapshot) | 82.6 | 72.4 | 76.6 | 40.5 |
+| ROSE² | 78.4 | 68.9 | 71.3 | 39.6 |
+| Morphological | 77.9 | 97.4 | 85.8 | 40.2 |
+| Distance Transform | 88.6 | 94.3 | 90.8 | 53.1 |
+| Voronoi | 89.5 | 90.3 | 89.4 | 64.1 |
+| TVARS | 85.6 | 97.4 | 90.6 | 50.8 |
+| OccuSG | 89.8 | 67.4 | 76.4 | 51.3 |
+| SysNav | 79.0 | 84.2 | 80.9 | 34.7 |
+| **VoxRoom** | **93.7** | 94.2 | **93.6** | **77.3** |
+
+### VoxRoom throughout exploration — Table I
+
+| Coverage | P ↑ | R ↑ | F1 ↑ | room-mIoU ↑ |
+| --- | ---: | ---: | ---: | ---: |
+| 20% | 89.8 | 96.3 | 92.1 | 73.4 |
+| 40% | 92.3 | 95.1 | 93.2 | 74.9 |
+| 60% | 93.7 | 94.1 | 93.6 | 74.8 |
+| 70% | 94.1 | 94.0 | 93.8 | 76.6 |
+| 80% | 95.0 | 92.9 | 93.6 | 78.1 |
+| 90% | 95.3 | 93.3 | 94.0 | 80.6 |
+| Final | 96.0 | 93.9 | 94.7 | 82.6 |
+| **Average** | **93.7** | **94.2** | **93.6** | **77.3** |
+
+### Ablation study — Table III
+
+| Setting | P ↑ | R ↑ | F1 ↑ | room-mIoU ↑ |
+| --- | ---: | ---: | ---: | ---: |
+| Full model | **93.8** | 94.2 | 93.6 | **77.4** |
+| A1: without 2D ray-casting seeds | 91.0 | 96.0 | 92.9 | 68.4 |
+| A2: without 3D voxel-derived seeds | 86.9 | 97.9 | 91.5 | 56.3 |
+| A3: without learned verifier | 93.1 | 92.3 | 92.3 | 72.6 |
+| A4: Nav-Free context instead of SFM context | 93.3 | 96.0 | **94.3** | 74.1 |
+| A5: 2D-only verifier | 73.3 | **98.3** | 82.9 | 31.9 |
+| A6: 3D-only verifier | 91.3 | 95.9 | 93.0 | 70.3 |
+| A7: dense verification of all structural-free cells | 92.6 | 95.0 | 93.4 | 72.0 |
+
+The full-model entries are preserved exactly as printed in each table: Table I reports 77.3 room-mIoU; Table III reports 77.4. A1/A2 change candidate sources; A4 changes only the verifier's 2D input; A7 removes candidate prescreening. These settings are not interchangeable.
+
+<details>
+<summary>Temporal stability — Table II</summary>
+
+Compute statistics over each scene's available progress points first, then average scene-level statistics. Mean, CV, and Avg. Worst are percentages; SD is in percentage points.
+
+| Method | F1 Mean ↑ | SD ↓ | CV ↓ | Avg. Worst ↑ | mIoU Mean ↑ | SD ↓ | CV ↓ | Avg. Worst ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Gomez-reprod. | 89.6 | 3.4 | 3.9 | 84.0 | 64.5 | 11.9 | 19.5 | 45.6 |
+| DUDE (Incremental) | 76.4 | 5.4 | 7.0 | 68.8 | 41.3 | 11.7 | 27.5 | 25.9 |
+| DUDE (Snapshot) | 76.7 | 5.5 | 7.1 | 69.2 | 40.6 | 12.2 | 29.2 | 24.8 |
+| ROSE² | 71.3 | 17.8 | 27.7 | 39.1 | 39.7 | 16.1 | 44.1 | 16.9 |
+| Morphological | 85.9 | 6.8 | 8.1 | 74.8 | 40.3 | 17.0 | 42.0 | 19.1 |
+| Distance Transform | 90.8 | 4.6 | 5.2 | 82.5 | 53.2 | 15.3 | 29.8 | 31.1 |
+| Voronoi | 89.4 | 4.1 | 4.6 | 83.0 | 64.1 | 13.4 | 22.0 | 43.2 |
+| TVARS | 90.6 | 4.3 | 5.0 | 83.3 | 51.0 | 15.0 | 30.9 | 30.5 |
+| OccuSG | 76.4 | 5.2 | 6.9 | 68.5 | 51.3 | **9.7** | 19.3 | 37.0 |
+| SysNav | 80.9 | 7.0 | 9.0 | 69.1 | 34.7 | 14.9 | 42.6 | 17.0 |
+| **VoxRoom** | **93.6** | **3.3** | **3.7** | **88.1** | **77.4** | 11.6 | **17.9** | **59.4** |
+
+</details>
+
+- Evaluate available checkpoints at **20%, 40%, 60%, 70%, 80%, 90%, and Final**. Missing checkpoints are reported, not fabricated.
+- Compute metrics per checkpoint on the shared observed reference domain, then average across valid checkpoints; the two datasets are weighted by their checkpoint counts.
+- P measures predicted-region purity; R measures coverage of each GT room by its best-overlapping prediction. F1 is computed per checkpoint before averaging.
+- Room-mIoU uses maximum-total-IoU **one-to-one Hungarian matching**, divided by the number of GT rooms; unmatched GT rooms contribute zero.
+- For temporal stability, first calculate mean, population SD, CV, and worst within each scene's available progress points, then average scene-level statistics.
+- Filter room regions smaller than **0.5 m²**. Raw predictions and the evaluation domain determine metrics, not presentation colors or hand-edited figures.
+
+The tables above follow manuscript Tables I–III. **Detailed experiment data and model weights are not uploaded in this release.** Existing local run exports are retained unchanged, not rewritten to match manuscript values; see [release notes](docs/release_notes.md).
+
+## Repository guide
 
 ```text
-external_baselines/Active_room_segmentation/
-  detr_door_detection/train_params/detr_resnet50_4/final_doors_dataset/model.pth
+voxroom_online/
+  isaac_runtime/
+    mapping/              # Occupancy, structural maps, doors, separators, room labels
+    door_seed_learning/   # Collection, annotation, datasets, verifier, training, inference
+    evaluation/           # Room-overlap metrics and evaluation workflows
+    baselines/            # Adapters; external source/checkpoints are not bundled
+    scripts/              # Simulation, dataset, training, and snapshot entry points
+    visualization/        # Online diagnostic views
+  real_runtime/           # Existing ZED runtime; not the unreleased LiDAR demo
+configs/                  # Runtime configuration templates
+scripts/                  # Launchers and reproducibility utilities
+tests/                    # Regression tests
+docs/
+  assets/                 # Original pipeline PDF, PNG, simulation MP4/GIF/poster
+  index.html              # Browser-playable demos, with a real-world placeholder
+real_robot/               # Reserved FAST-LIO2 / voxel / TensorRT deployment release
+repro/                    # Historical experiment manifests
 ```
 
-## 运行 GRScene 实验
+## Citation, contact, and attribution
 
-准备好 episode 清单和两个 checkpoint 后：
+The associated manuscript is **VoxRoom: Room Segmentation from Partial Observations during Robot Exploration**, submitted to **ICRA 2027** and currently **under review**. A public paper link and finalized bibliographic metadata will be added when available.
 
-```bash
-DATASETS=grscene \
-BATCH_ROOT=/data/voxroom_roomseg_evaluation/my_grscene_run \
-VOXROOM_ROOT=$PWD \
-ACTIVE_ROOM_ROOT=$PWD/external_baselines/Active_room_segmentation \
-scripts/run_all_datasets_roomseg_coverage_eval.sh
-```
+For the software, use [CITATION.cff](CITATION.cff). Code maintenance and this release are credited to **EchO-NN**, [2579947814@qq.com](mailto:2579947814@qq.com). Contributions in this release use that Git author/committer identity, not the workstation's login name. Existing commit history and upstream authorship are retained.
 
-单场景入口为：
-
-```bash
-RUN_DIR=/data/voxroom_roomseg_evaluation/debug_scene \
-scripts/run_roomseg_coverage_eval_isaac.sh /path/to/scene_episode.jsonl
-```
-
-## 重新计算指标
-
-```bash
-python scripts/evaluate_approved_roomseg_paper_pr.py \
-  --voxroom-index /path/to/index_voxroom.json \
-  --tvars-index /path/to/index_tvars_original.json \
-  --annotation-dir /path/to/annotations \
-  --gt-dir /path/to/final_gt \
-  --paper /path/to/Topology-Based_Visual_Active_Room_Segmentation.pdf \
-  --out-dir /path/to/metrics \
-  --min-room-area-m2 0.5 \
-  --cell-size-m 0.05
-```
-
-两个采集批次的精确源码清单和第一批的两个差异文件见 [`repro/README.md`](repro/README.md)。
-
+The code is distributed under the [MIT License](LICENSE). Please retain the upstream copyright notices and consult [third-party attribution](docs/attribution.md). External datasets, models, simulator components, and baseline implementations retain their respective licenses.

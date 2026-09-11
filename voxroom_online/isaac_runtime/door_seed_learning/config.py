@@ -4,9 +4,14 @@ from dataclasses import asdict, dataclass
 from typing import Mapping
 
 
-VALID_MODES = {"disabled", "collect", "inference"}
+VALID_MODES = {"disabled", "collect", "inference", "rules_only"}
 VALID_CONTEXT_SOURCES = {"vertical", "nav"}
-VALID_RAW_SEED_SOURCES = {"voxroom", "voxroom_tvars_vertical_union"}
+VALID_RAW_SEED_SOURCES = {
+    "voxroom",
+    "tvars_vertical",
+    "voxroom_tvars_vertical_union",
+    "vertical_free_all",
+}
 
 
 @dataclass(frozen=True)
@@ -29,7 +34,12 @@ class DoorSeedLearningConfig:
     checkpoint_path: str = ""
     device: str = "cuda:0"
     inference_batch_size: int = 256
+    reuse_column_encodings: bool = True
+    column_encoding_batch_size: int = 2048
+    column_encoding_cache_size: int = 65536
     keep_threshold: float | None = None
+    allow_source_code_hash_mismatch: bool = False
+    ablation_allow_checkpoint_mismatch: bool = False
     fallback_to_rule_seed_on_error: bool = False
     keep_uninformative_seed: bool = False
     uninformative_observed_ratio_min: float = 0.02
@@ -57,12 +67,15 @@ class DoorSeedLearningConfig:
         context_source = str(self.context_source).strip().lower()
         raw_seed_source = str(self.raw_seed_source).strip().lower()
         if mode not in VALID_MODES:
-            raise ValueError("door_seed_learning.mode must be disabled, collect, or inference")
+            raise ValueError(
+                "door_seed_learning.mode must be disabled, collect, inference, or rules_only"
+            )
         if context_source not in VALID_CONTEXT_SOURCES:
             raise ValueError("door_seed_learning.context_source must be vertical or nav")
         if raw_seed_source not in VALID_RAW_SEED_SOURCES:
             raise ValueError(
-                "door_seed_learning.raw_seed_source must be voxroom or voxroom_tvars_vertical_union"
+                "door_seed_learning.raw_seed_source must be voxroom, tvars_vertical, "
+                "voxroom_tvars_vertical_union, or vertical_free_all"
             )
         for name, value in (
             ("local_voxel_patch_size", self.local_voxel_patch_size),
@@ -89,10 +102,15 @@ class DoorSeedLearningConfig:
             raise ValueError("door_seed_learning.tvars_seed_width_cells must be a positive odd integer")
         if mode == "inference" and not str(self.checkpoint_path).strip():
             raise ValueError("door_seed_learning.checkpoint_path is required in inference mode")
+        if mode == "rules_only" and raw_seed_source == "vertical_free_all":
+            raise ValueError("rules_only mode does not support vertical_free_all")
         if self.keep_threshold is not None and not 0.0 <= float(self.keep_threshold) <= 1.0:
             raise ValueError("door_seed_learning.keep_threshold must be in [0, 1]")
         if int(self.inference_batch_size) <= 0:
             raise ValueError("door_seed_learning.inference_batch_size must be positive")
+        for name in ("column_encoding_batch_size", "column_encoding_cache_size"):
+            if int(getattr(self, name)) <= 0:
+                raise ValueError("door_seed_learning.%s must be positive" % name)
         if float(self.height_scale_m) <= 0.0:
             raise ValueError("door_seed_learning.height_scale_m must be positive")
         for name, value in (

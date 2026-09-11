@@ -18,11 +18,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Train a VoxRoom raw DoorSeed binary classifier.")
     parser.add_argument("--index", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Optional compatible checkpoint whose model weights initialize training.",
+    )
     parser.add_argument("--context-source", choices=["vertical", "nav"], required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--precision", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--height-scale-m", type=float, default=4.0)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-epochs", type=int, default=50)
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument(
@@ -31,6 +37,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="validation_score",
     )
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.add_argument(
+        "--checkpoint-selection-mode",
+        choices=["operating_metric", "fixed_f1", "validation_loss"],
+        default="operating_metric",
+        help="Metric family used for checkpoint selection and validation-score early stopping.",
+    )
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--target-recall", type=float, default=0.98)
@@ -50,8 +62,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--snapshot-cache-size",
         type=int,
-        default=0,
-        help="Snapshots retained in RAM per split; 0 caches every snapshot referenced by that split.",
+        default=6,
+        help="Snapshots retained in RAM per split; 0 selects the safe automatic limit of 6.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -66,22 +78,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Add one deterministic left-right mirrored copy of every base training sample.",
     )
     parser.add_argument("--local-only", action="store_true")
+    parser.add_argument("--context-only", action="store_true")
     parser.add_argument("--source-root", default=str(REPO_ROOT / "voxroom_online/isaac_runtime/door_seed_learning"))
     args = parser.parse_args(argv)
+    if args.local_only and args.context_only:
+        parser.error("--local-only and --context-only are mutually exclusive")
+    model_config = None
+    if args.local_only:
+        model_config = {"z_count": _z_count(args.index), "use_context_branch": False}
+    elif args.context_only:
+        model_config = {"z_count": _z_count(args.index), "use_voxel_branch": False}
     result = train_classifier(
         index_path=args.index,
         output_dir=args.out_dir,
         context_source=args.context_source,
         height_scale_m=float(args.height_scale_m),
-        model_config=None if not args.local_only else {"z_count": _z_count(args.index), "use_context_branch": False},
+        model_config=model_config,
         training_config=TrainingConfig(
             learning_rate=float(args.learning_rate),
             weight_decay=float(args.weight_decay),
             batch_size=int(args.batch_size),
+            num_workers=int(args.num_workers),
             max_epochs=int(args.max_epochs),
             early_stopping_patience=int(args.patience),
             early_stopping_metric=str(args.early_stopping_metric),
             early_stopping_min_delta=float(args.early_stopping_min_delta),
+            checkpoint_selection_mode=str(args.checkpoint_selection_mode),
             target_recall=float(args.target_recall),
             threshold_selection_mode=str(args.threshold_selection_mode),
             fixed_keep_threshold=float(args.fixed_keep_threshold),
@@ -94,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             precision=str(args.precision),
         ),
         source_root=args.source_root,
+        initial_checkpoint_path=args.init_checkpoint,
     )
     print(result)
     return 0

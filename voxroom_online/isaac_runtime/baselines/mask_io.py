@@ -7,6 +7,15 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 
+SEGMENTATION_INPUT_MODE_KEY = "_baseline_segmentation_input_mode"
+SEGMENTATION_INPUT_RAW_VERTICAL_FREE = "raw_vertical_free"
+SEGMENTATION_INPUT_RAW_NAV_FREE_NO_CLEARANCE = "raw_nav_free_no_clearance"
+SEGMENTATION_INPUT_MODES = (
+    SEGMENTATION_INPUT_RAW_VERTICAL_FREE,
+    SEGMENTATION_INPUT_RAW_NAV_FREE_NO_CLEARANCE,
+)
+
+
 def relabel_consecutive(label_map: np.ndarray) -> np.ndarray:
     """Return int32 label map with labels 1..K, preserving 0 as background."""
     arr = np.asarray(label_map)
@@ -70,6 +79,80 @@ def build_metric_domain_from_source(source_arrays: Mapping[str, Any]) -> np.ndar
     if np.count_nonzero(domain & obstacle) or np.count_nonzero(domain & unknown):
         raise ValueError("metric domain overlaps obstacle or unknown cells")
     return domain
+
+
+def build_segmentation_domain_from_source(source_arrays: Mapping[str, Any]) -> tuple[np.ndarray, str]:
+    """Return the explicitly selected raw online segmentation input.
+
+    Coverage snapshots also carry fixed-reference masks used to measure coverage
+    and to define the metric domain.  In InteriorAgent those masks are cleaned
+    independently inside each GT room polygon, so intersecting them with the
+    Vertical-Free projection would leak pre-separated room geometry into every
+    baseline.  Reference masks must therefore never alter a method's input.
+    Reference masks must therefore never alter either Vertical-Free or the
+    no-clearance navigation projection.
+    """
+    shape_source = source_arrays.get("occupancy_map")
+    if shape_source is None:
+        shape_source = source_arrays.get("final_room_label_map")
+    if shape_source is None:
+        shape_source = source_arrays.get("observed_free_mask")
+    if shape_source is None:
+        raise KeyError(
+            "source snapshot missing occupancy_map, final_room_label_map, and observed_free_mask"
+        )
+    shape = np.asarray(shape_source).shape
+    if len(shape) != 2:
+        raise ValueError("segmentation source shape must be 2D")
+
+    explicit_mode = SEGMENTATION_INPUT_MODE_KEY in source_arrays
+    mode = segmentation_input_mode_from_source(source_arrays)
+    candidates = (
+        (
+            "voxel_nav_free_xy",
+            "navigation_free_room_domain",
+        )
+        if mode == SEGMENTATION_INPUT_RAW_NAV_FREE_NO_CLEARANCE
+        else (
+            "voxel_vertical_free_xy",
+            "height_profile_vertical_free_xy",
+            "vertical_free_room_domain",
+        )
+    )
+    for key in candidates:
+        value = source_arrays.get(key)
+        if value is None:
+            continue
+        free = np.asarray(value, dtype=bool)
+        if free.shape != shape or not bool(np.any(free)):
+            continue
+        return free.copy(), str(key)
+
+    if not explicit_mode and mode == SEGMENTATION_INPUT_RAW_VERTICAL_FREE:
+        return (
+            build_metric_domain_from_source(source_arrays),
+            "metric_domain_fallback_no_vertical_free",
+        )
+    raise KeyError(
+        "snapshot lacks a non-empty %s segmentation input; checked %s"
+        % (mode, ", ".join(candidates))
+    )
+
+
+def segmentation_input_mode_from_source(source_arrays: Mapping[str, Any]) -> str:
+    raw = source_arrays.get(SEGMENTATION_INPUT_MODE_KEY)
+    if raw is None:
+        return SEGMENTATION_INPUT_RAW_VERTICAL_FREE
+    values = np.asarray(raw).reshape(-1)
+    if values.size != 1:
+        raise ValueError("baseline segmentation input mode must be scalar")
+    mode = str(values[0]).strip()
+    if mode not in SEGMENTATION_INPUT_MODES:
+        raise ValueError(
+            "unsupported baseline segmentation input mode %r; expected one of %s"
+            % (mode, ", ".join(SEGMENTATION_INPUT_MODES))
+        )
+    return mode
 
 
 def enforce_room_mask_contract(

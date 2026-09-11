@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "voxroom-online"
 version = "0.1.0"
 description = "Online voxel room segmentation and random-frontier exploration in Isaac Sim"
+authors = [{name = "EchO-NN", email = "2579947814@qq.com"}]
+maintainers = [{name = "EchO-NN", email = "2579947814@qq.com"}]
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "numpy",
@@ -24,6 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 door-seed-learning = ["torch>=2.2"]
+
+[project.urls]
+Repository = "https://github.com/EchO-NN/VoxRoom"
+Issues = "https://github.com/EchO-NN/VoxRoom/issues"
 
 [tool.setuptools.packages.find]
 include = ["voxroom_online*"]

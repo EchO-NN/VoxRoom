@@ -7,9 +7,19 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlparse
 
 from .ros_bridge_payload import load_result, save_input_arrays, write_request
 from .offline.base import BaselineResult, MissingOriginalImplementationError
+
+
+ROS_RUNTIME_ENV_KEYS = (
+    "ROS_MASTER_URI",
+    "ROS_IP",
+    "ROS_HOSTNAME",
+    "ROS_LOG_DIR",
+    "ROS_HOME",
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +113,26 @@ def build_ros_shell_command(module: str, request_json: Path | str, config: RosSu
     return _shell_command(module=module, request_json=Path(request_json), config=config)
 
 
+def runtime_ros_env_export_lines() -> list[str]:
+    """Restore per-job ROS routing after a login shell sources user startup files."""
+    lines: list[str] = []
+    for key in ROS_RUNTIME_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            lines.append(f"export {key}={shlex.quote(value)}")
+    return lines
+
+
+def runtime_ros_master_port() -> int | None:
+    value = os.environ.get("ROS_MASTER_URI")
+    if not value:
+        return None
+    try:
+        return urlparse(value).port
+    except ValueError:
+        return None
+
+
 def _shell_command(*, module: str, request_json: Path, config: RosSubprocessConfig) -> str:
     lines = ["set -euo pipefail"]
     if config.ros_setup:
@@ -114,6 +144,7 @@ def _shell_command(*, module: str, request_json: Path, config: RosSubprocessConf
     for setup in config.workspace_setups:
         quoted = shlex.quote(str(setup))
         lines.append(f"if [ -f {quoted} ]; then set +u; source {quoted}; set -u; fi")
+    lines.extend(runtime_ros_env_export_lines())
     repo = shlex.quote(str(config.repo_root))
     lines.append(f"export PYTHONPATH={repo}:\"${{PYTHONPATH:-}}\"")
     lines.append(

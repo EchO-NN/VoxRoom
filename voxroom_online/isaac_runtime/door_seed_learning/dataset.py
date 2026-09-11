@@ -36,6 +36,8 @@ class DoorSeedDataset:
         seed: int = 0,
         local_patch_size: int = LOCAL_PATCH_SIZE,
         context_patch_size: int = CONTEXT_PATCH_SIZE,
+        use_voxel_branch: bool = True,
+        use_context_branch: bool = True,
     ) -> None:
         self.rows = read_index(index_path)
         allowed_splits = None if split is None else ({str(split)} if isinstance(split, str) else {str(v) for v in split})
@@ -57,6 +59,10 @@ class DoorSeedDataset:
         self.rng = np.random.default_rng(int(seed))
         self.local_patch_size = int(local_patch_size)
         self.context_patch_size = int(context_patch_size)
+        self.use_voxel_branch = bool(use_voxel_branch)
+        self.use_context_branch = bool(use_context_branch)
+        if not self.use_voxel_branch and not self.use_context_branch:
+            raise ValueError("at least one dataset input branch must be enabled")
         self._cache: OrderedDict[str, dict[str, np.ndarray]] = OrderedDict()
 
     def __len__(self) -> int:
@@ -79,47 +85,70 @@ class DoorSeedDataset:
         arrays = self._snapshot(str(row["snapshot_path"]))
         seed_index = int(row["seed_index"])
         rc = np.asarray([[int(row["row"]), int(row["col"])]], dtype=np.int32)
-        voxel = extract_seed_voxel_patch_from_snapshot(
-            arrays,
-            seed_index=seed_index,
-            seed_rc=rc,
-            patch_size=self.local_patch_size,
-        )
-        if tuple(voxel.shape[-2:]) != (self.local_patch_size, self.local_patch_size):
-            raise ValueError(
-                "dataset local voxel patch does not match requested %dx%d input"
-                % (self.local_patch_size, self.local_patch_size)
+        if self.use_voxel_branch:
+            voxel = extract_seed_voxel_patch_from_snapshot(
+                arrays,
+                seed_index=seed_index,
+                seed_rc=rc,
+                patch_size=self.local_patch_size,
             )
+            if tuple(voxel.shape[-2:]) != (self.local_patch_size, self.local_patch_size):
+                raise ValueError(
+                    "dataset local voxel patch does not match requested %dx%d input"
+                    % (self.local_patch_size, self.local_patch_size)
+                )
+        else:
+            voxel = np.empty((0,), dtype=np.uint8)
         context_key = "vertical_class_map_xy" if self.context_source == "vertical" else "nav_class_map_xy"
-        context = extract_class_patches(
-            arrays[context_key], rc, patch_size=self.context_patch_size
-        )[0]
+        context = (
+            extract_class_patches(
+                arrays[context_key], rc, patch_size=self.context_patch_size
+            )[0]
+            if self.use_context_branch
+            else np.empty((0,), dtype=np.uint8)
+        )
         if rotation_degrees:
-            voxel, context = apply_synchronized_xy_transform(
-                voxel,
-                context,
-                rotations=rotation_degrees // 90,
-            )
+            if self.use_voxel_branch:
+                voxel = np.ascontiguousarray(
+                    np.rot90(voxel, k=rotation_degrees // 90, axes=(-2, -1))
+                )
+            if self.use_context_branch:
+                context = np.ascontiguousarray(
+                    np.rot90(context, k=rotation_degrees // 90, axes=(-2, -1))
+                )
         if mirrored_lr:
-            voxel, context = apply_synchronized_xy_transform(
-                voxel,
-                context,
-                flip_lr=True,
-            )
+            if self.use_voxel_branch:
+                voxel = np.ascontiguousarray(np.flip(voxel, axis=-1))
+            if self.use_context_branch:
+                context = np.ascontiguousarray(np.flip(context, axis=-1))
         if self.augment:
-            voxel, context = apply_synchronized_xy_transform(
-                voxel,
-                context,
-                rotations=int(self.rng.integers(0, 4)),
-                flip_lr=bool(self.rng.integers(0, 2)),
-                flip_ud=bool(self.rng.integers(0, 2)),
-            )
-        voxel_channels = voxel_states_to_model_channels(
-            voxel[None, ...],
-            arrays["z_centers_m"],
-            height_scale_m=self.height_scale_m,
-        )[0]
-        context_channels = class_patches_to_one_hot(context[None, ...])[0]
+            rotations = int(self.rng.integers(0, 4))
+            flip_lr = bool(self.rng.integers(0, 2))
+            flip_ud = bool(self.rng.integers(0, 2))
+            if self.use_voxel_branch:
+                voxel, _ = apply_synchronized_xy_transform(
+                    voxel, np.zeros((1, 1), dtype=np.uint8),
+                    rotations=rotations, flip_lr=flip_lr, flip_ud=flip_ud,
+                )
+            if self.use_context_branch:
+                _, context = apply_synchronized_xy_transform(
+                    np.zeros((1, 1, 1), dtype=np.uint8), context,
+                    rotations=rotations, flip_lr=flip_lr, flip_ud=flip_ud,
+                )
+        voxel_channels = (
+            voxel_states_to_model_channels(
+                voxel[None, ...],
+                arrays["z_centers_m"],
+                height_scale_m=self.height_scale_m,
+            )[0]
+            if self.use_voxel_branch
+            else np.empty((0,), dtype=np.float32)
+        )
+        context_channels = (
+            class_patches_to_one_hot(context[None, ...])[0]
+            if self.use_context_branch
+            else np.empty((0,), dtype=np.float32)
+        )
         return {
             "voxel": torch.from_numpy(voxel_channels),
             "context": torch.from_numpy(context_channels),

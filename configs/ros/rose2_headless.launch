@@ -1,0 +1,14 @@
+<launch>
+  <!-- Original ROSE2 nodes and parameters, without the paper repository's RViz process. -->
+  <node pkg="rose2" type="FeatureExtractorROSE.py" name="ROSE" output="screen">
+    <param name="/filter" value="0.18"/>
+    <param name="/pub_once" value="True"/>
+    <param name="/pub_once2" value="False"/>
+    <param name="/spatialClusteringLineSegmentsThreshold" value="5"/>
+    <param name="/lines_th1" value="0.0"/>
+    <param name="/lines_distance" value="20"/>
+    <param name="/edges_th" value="0.0"/>
+    <param name="/rooms_voronoi" value="False"/>
+  </node>
+  <node pkg="rose2" type="FeatureExtractorROSE2.py" name="ROSE2" output="screen"/>
+</launch>

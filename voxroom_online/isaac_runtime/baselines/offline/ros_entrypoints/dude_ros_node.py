@@ -8,7 +8,14 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from voxroom_online.isaac_runtime.baselines.data_contract import resolve_map_info
-from voxroom_online.isaac_runtime.baselines.mask_io import enforce_room_mask_contract
+from voxroom_online.isaac_runtime.baselines.mask_io import (
+    build_segmentation_domain_from_source,
+)
+from voxroom_online.isaac_runtime.baselines.offline.dude_image_io import (
+    DUDE_OUTPUT_COORDINATE_CONTRACT,
+    labels_from_tagged_image as _labels_from_tagged_image,
+    tagged_image_to_source_labels,
+)
 from voxroom_online.isaac_runtime.baselines.ros_bridge_payload import load_input_arrays, load_request, write_result
 from voxroom_online.isaac_runtime.baselines.ros_grid_io import snapshot_to_ros_occupancy_grid
 
@@ -47,6 +54,7 @@ def run_dude_snapshot(
         rospy.init_node(node_name, anonymous=True, disable_signals=True)
 
     map_info = resolve_map_info(snapshot_arrays=arrays, default_resolution_m=_optional_float(params.get("map_resolution_m")))
+    _segmentation_free, segmentation_source = build_segmentation_domain_from_source(arrays)
     occupancy_values = snapshot_to_ros_occupancy_grid(arrays)
     grid = OccupancyGrid()
     grid.header = Header()
@@ -71,9 +79,11 @@ def run_dude_snapshot(
     tagged = _wait_for_fresh_message(rospy, output_topic, Image, publish_stamp=publish_stamp, timeout_s=timeout_s)
     tagged_image = CvBridge().imgmsg_to_cv2(tagged, desired_encoding="passthrough")
     label_map = _labels_from_tagged_image(np.asarray(tagged_image), arrays)
+    method = str(request.get("method") or "dude_incremental")
+    use_incremental = bool(params.get("use_incremental", method == "dude_incremental"))
     metadata = {
-        "method": "dude_incremental",
-        "baseline_name": "dude_incremental",
+        "method": method,
+        "baseline_name": method,
         "runner_type": "original_ros",
         "main_experiment_allowed": True,
         "source_snapshot": str(request.get("snapshot_path")),
@@ -83,14 +93,19 @@ def run_dude_snapshot(
         "input_message_type": "nav_msgs/OccupancyGrid",
         "output_message_type": "sensor_msgs/Image",
         "input_occupancy_values": {"free": 0, "occupied": 100, "unknown": -1},
+        "segmentation_source": str(segmentation_source),
         "binary_free_value": 255,
         "binary_occupied_value": 0,
         "unknown_treated_as": "occupied/inaccessible",
         "uses_rgb": False,
         "uses_depth": False,
         "uses_oracle_semantics": False,
-        "incremental_state_reset_per_scene": True,
-        "incremental_order_enforced": True,
+        "incremental_state_reset_per_scene": bool(use_incremental),
+        "incremental_order_enforced": bool(use_incremental),
+        "offline_state_reset_per_snapshot": bool(not use_incremental),
+        "state_reset_scope": str(
+            params.get("state_reset_scope") or ("scene" if use_incremental else "snapshot")
+        ),
         "ros_bridge": "subprocess_rospy_publish_wait",
         "original_repo": "lfermin77/Incremental_DuDe_ROS",
         "original_repo_url": "https://github.com/lfermin77/Incremental_DuDe_ROS",
@@ -100,33 +115,19 @@ def run_dude_snapshot(
         "map_info": map_info.to_metadata(),
         "parameters": {
             "concavity_threshold_m": _optional_float(params.get("concavity_threshold_m")),
-            "use_incremental": True,
+            "use_incremental": bool(use_incremental),
         },
         "tagged_image_encoding": str(getattr(tagged, "encoding", "")),
+        "output_coordinate_contract": DUDE_OUTPUT_COORDINATE_CONTRACT,
+        "output_vertical_flip_applied": True,
         "freshness_guard": "header_stamp_at_or_after_published_map",
         "rooms_after_contract": int(len([v for v in np.unique(label_map) if int(v) > 0])),
     }
-    return {"label_map": label_map, "metadata": metadata, "debug_arrays": {"dude_ros_occupancy_grid": occupancy_values}}
-
-
-def _labels_from_tagged_image(tagged_image: np.ndarray, source_arrays: Mapping[str, Any]) -> np.ndarray:
-    image = np.asarray(tagged_image)
-    if image.ndim == 2:
-        labels = image.astype(np.int32, copy=True)
-        labels[labels < 0] = 0
-        return enforce_room_mask_contract(labels, source_arrays, clip_to_eval_domain=True)
-    if image.ndim == 3 and image.shape[2] in (3, 4):
-        rgb = np.asarray(image[..., :3], dtype=np.uint8)
-        flat = rgb.reshape(-1, 3)
-        labels = np.zeros(flat.shape[0], dtype=np.int32)
-        next_label = 1
-        for color in sorted({tuple(int(v) for v in row) for row in flat.tolist()}):
-            if color in {(0, 0, 0), (208, 208, 208), (255, 255, 255)}:
-                continue
-            labels[np.all(flat == np.asarray(color, dtype=np.uint8), axis=1)] = next_label
-            next_label += 1
-        return enforce_room_mask_contract(labels.reshape(rgb.shape[:2]), source_arrays, clip_to_eval_domain=True)
-    raise ValueError("unsupported DUDE tagged image shape: %s" % (image.shape,))
+    return {"label_map": label_map, "metadata": metadata, "debug_arrays": {
+        "dude_ros_occupancy_grid": occupancy_values,
+        "dude_tagged_image_native": np.asarray(tagged_image),
+        "dude_labels_source_frame": tagged_image_to_source_labels(tagged_image),
+    }}
 
 
 def _optional_float(value: Any) -> float | None:

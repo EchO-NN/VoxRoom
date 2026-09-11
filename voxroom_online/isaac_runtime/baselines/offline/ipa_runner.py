@@ -12,9 +12,16 @@ from typing import Any, Literal, Mapping
 import numpy as np
 
 from voxroom_online.isaac_runtime.baselines.data_contract import MapInfo, resolve_map_info
-from voxroom_online.isaac_runtime.baselines.mask_io import enforce_room_mask_contract
+from voxroom_online.isaac_runtime.baselines.mask_io import (
+    build_segmentation_domain_from_source,
+    enforce_room_mask_contract,
+)
 from voxroom_online.isaac_runtime.baselines.ros_grid_io import snapshot_to_ipa_image
-from voxroom_online.isaac_runtime.baselines.ros_subprocess import RosSubprocessConfig, run_ros_module
+from voxroom_online.isaac_runtime.baselines.ros_subprocess import (
+    RosSubprocessConfig,
+    run_ros_module,
+    runtime_ros_env_export_lines,
+)
 from voxroom_online.isaac_runtime.baselines.offline.base import BaselineResult, MissingOriginalImplementationError
 from voxroom_online.isaac_runtime.baselines.offline.fallback_distance import (
     DISTANCE_ALGORITHM_ID,
@@ -360,12 +367,8 @@ def _discover_original_commit(path: Path | None) -> str | None:
 
 
 def _input_free_definition(arrays: Mapping[str, Any]) -> str:
-    nav = arrays.get("navigation_free_room_domain")
-    if nav is not None:
-        arr = np.asarray(nav, dtype=bool)
-        if arr.ndim == 2 and bool(arr.any()):
-            return "navigation_free_room_domain"
-    return "observed_free_minus_obstacle_unknown"
+    _free, source = build_segmentation_domain_from_source(arrays)
+    return str(source)
 
 
 def _algorithm_display_name(algorithm: str) -> str:
@@ -424,6 +427,7 @@ def build_ipa_roslaunch_shell(config: RosSubprocessConfig) -> str:
     for setup in config.workspace_setups:
         quoted = shlex.quote(str(setup))
         lines.append(f"if [ -f {quoted} ]; then set +u; source {quoted}; set -u; fi")
+    lines.extend(runtime_ros_env_export_lines())
     lines.append("exec roslaunch ipa_room_segmentation room_segmentation_action_server.launch")
     return "\n".join(lines)
 
@@ -436,6 +440,7 @@ def build_ipa_action_probe_shell(config: RosSubprocessConfig, *, action_name: st
         lines.append("set +u")
         lines.append(f"source {setup}")
         lines.append("set -u")
+    lines.extend(runtime_ros_env_export_lines())
     topic_prefix = "/" + str(action_name).strip("/")
     goal_topic = shlex.quote(topic_prefix + "/goal")
     result_topic = shlex.quote(topic_prefix + "/result")

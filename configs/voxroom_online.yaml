@@ -201,6 +201,9 @@ mapping:
       checkpoint_path: outputs/door_seed_training_runs/approved23_rot4_mirror1_vertical_20260813_1622/model_vertical_fixed0p5/best.pt
       device: cuda:0
       inference_batch_size: 32
+      reuse_column_encodings: true  # inference only; identical column inputs share the Transformer output
+      column_encoding_batch_size: 2048
+      column_encoding_cache_size: 65536  # bounded CPU cache; no whole-map GPU allocation
       keep_threshold: 0.5
       fallback_to_rule_seed_on_error: false
       keep_uninformative_seed: false
@@ -614,6 +617,7 @@ mapping:
       primitive_max_along_gap_cells: 0.0
       primitive_min_line_correlation: 0.95
       primitive_max_orthogonal_variance_cells2: 0.65
+      enable_l_shaped_seed_branches: false
       enable_seed_line_spur_pruning: true
       seed_line_spur_prune_max_branch_length_ratio: 0.35
       seed_line_spur_prune_max_total_branch_ratio: 0.45

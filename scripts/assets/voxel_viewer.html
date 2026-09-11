@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0003 · 70% 三维体素查看器</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,"Noto Sans CJK SC",sans-serif;color:#34343c;background:#fff;overflow:hidden}
+#viewport{position:absolute;inset:0 0 0 312px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:100%;outline:none}
+#panel{position:absolute;inset:0 auto 0 0;width:312px;padding:24px 22px;overflow:auto;background:#faf9f8;border-right:1px solid #e6e2e0}
+h1{font-size:23px;margin:0 0 2px;font-weight:650;letter-spacing:-.6px}h2{font-size:13px;margin:24px 0 10px;color:#746e70;letter-spacing:1px}
+.sub{font-size:12px;color:#8b8488}.badge{font-size:11px;color:#906772;background:#f1e7e9;padding:3px 8px;display:inline-block;border-radius:6px;margin-bottom:10px}
+.row{display:flex;align-items:center;gap:8px;margin:9px 0}.row.spread{justify-content:space-between}.swatch{width:14px;height:14px;display:inline-block;border:1px solid;vertical-align:middle;margin-right:5px}
+input[type=checkbox]{accent-color:#9a7080;width:16px;height:16px;margin:0 8px 0 0;vertical-align:middle}
+input[type=range]{width:100%;accent-color:#9a7080;margin:2px 0 9px}input[type=color]{border:0;width:27px;height:24px;background:none;padding:0;cursor:pointer}
+button,select{font:inherit;border:1px solid #dfd9d8;border-radius:7px;background:#fff;color:#454049;padding:8px 10px;cursor:pointer}
+button:hover{border-color:#b78f9b;background:#f9f3f5}button:disabled{opacity:.5;cursor:wait}.buttons{display:flex;gap:7px;flex-wrap:wrap}.buttons button{flex:1;white-space:nowrap}
+.primary{background:#956a79;color:#fff;border-color:#956a79}.primary:hover{background:#825a68;color:#fff}.wide{width:100%}
+.pair{display:flex;justify-content:space-between;font-size:12px;color:#6f6870;margin-top:6px}.pair output{font-variant-numeric:tabular-nums}
+details{margin:10px 0}summary{cursor:pointer;color:#766d73;font-size:12px}.note{font-size:12px;color:#8b8287;margin-top:10px;line-height:1.7}
+#status{position:absolute;left:22px;bottom:17px;color:#938b90;font-size:12px;pointer-events:none}#help{position:absolute;right:20px;bottom:17px;color:#8a8387;font-size:12px;pointer-events:none}
+#toolbar{position:absolute;right:18px;top:16px;display:flex;gap:8px}#toolbar button{box-shadow:0 2px 12px #00000006;font-size:12px;background:#ffffffec}
+#busy{position:absolute;left:50%;top:20px;transform:translateX(-50%);background:#fff8fbed;box-shadow:0 3px 14px #0000000c;border:1px solid #e8dfe2;border-radius:9px;padding:10px 17px;font-size:13px;display:none}
+.hidden-ui #panel{display:none}.hidden-ui #viewport{left:0}.hidden-ui #status,.hidden-ui #help{display:none}.hidden-ui #toolbar{opacity:0;transition:opacity .2s}.hidden-ui #toolbar:hover{opacity:1}
+.error{color:#9f2338;background:#fff4f5;padding:18px;margin:30px;white-space:pre-wrap}
+@media(max-width:750px){#panel{width:250px;padding:18px}#viewport{left:250px}#help{display:none}}
+</style>
+</head>
+<body>
+<aside id="panel">
+ <div class="badge">SAVED VOXELS · INTERIORAGENT</div>
+ <h1>0003 <span style="color:#ac858f">/ 70%</span></h1>
+ <div class="sub">5 cm 原始体素 · 自由视角</div>
+ <h2>体素显示</h2>
+ <label class="row"><input id="occupied" type="checkbox" checked><span class="swatch" style="background:#E4979F;border-color:#916C72"></span>occupied <span class="sub">占用</span></label>
+ <label class="row"><input id="unknown" type="checkbox" checked><span class="swatch" style="background:#D9D9D9;border-color:#888785"></span>unknown <span class="sub">未知</span></label>
+ <div class="sub">free 留空；灰色方块会遮挡内部。</div>
+ <label class="row"><input id="edges" type="checkbox" checked>显示每格边线</label>
+ <div class="pair"><span>边线粗细</span><output id="edgeValue">0.8 px</output></div>
+ <input id="edgeWidth" type="range" min="0.25" max="2.5" value="0.8" step="0.05">
+ <details><summary>面色与边色</summary>
+ <div class="row spread"><span>occupied</span><span><input id="occFace" type="color" value="#e4979f" title="occupied 面色"> <input id="occEdge" type="color" value="#916c72" title="occupied 边色"></span></div>
+ <div class="row spread"><span>unknown</span><span><input id="unkFace" type="color" value="#d9d9d9" title="unknown 面色"> <input id="unkEdge" type="color" value="#888785" title="unknown 边色"></span></div>
+ </details>
+ <h2>显示范围</h2>
+ <div class="buttons"><button id="fullRange">完整网格</button><button id="sceneRange">场景范围</button></div>
+ <div class="pair"><span>底部高度</span><output id="zminValue"></output></div><input id="zmin" type="range">
+ <div class="pair"><span>顶部高度</span><output id="zmaxValue"></output></div><input id="zmax" type="range">
+ <details><summary>X / Y 剖切范围</summary>
+ <div class="pair"><span>X 最小</span><output id="xminValue"></output></div><input id="xmin" type="range">
+ <div class="pair"><span>X 最大</span><output id="xmaxValue"></output></div><input id="xmax" type="range">
+ <div class="pair"><span>Y 最小</span><output id="yminValue"></output></div><input id="ymin" type="range">
+ <div class="pair"><span>Y 最大</span><output id="ymaxValue"></output></div><input id="ymax" type="range">
+ </details>
+ <div class="buttons"><button id="cutaway">2 m 剖视</button><button id="fit">居中显示</button></div>
+ <h2>视角</h2>
+ <label class="row"><input id="firstPerson" type="checkbox" checked>第一人称：在当前位置转头</label>
+ <div class="pair"><span>WASD 移动速度</span><output id="moveSpeedValue">2.0 m/s</output></div>
+ <input id="moveSpeed" type="range" min="0.2" max="20" value="2" step="0.2">
+ <div class="sub">W / S 前后，A / D 左右，Q / E 降升；Shift 加速。</div>
+ <div class="sub" id="cameraPosition"></div>
+ <div class="buttons"><button id="iso">斜视</button><button id="top">俯视</button><button id="front">正视</button></div>
+ <label class="row"><input id="ortho" type="checkbox">正交投影（环绕模式）</label>
+ <h2>截图</h2>
+ <div class="row"><select id="exportSize" style="flex:1"><option value="1920">1920 px</option><option value="3840" selected>3840 px</option><option value="6000">6000 px</option></select><button id="screenshot" class="primary">导出 PNG</button></div>
+ <label class="row"><input id="transparent" type="checkbox">透明背景</label>
+ <button id="saveView" class="wide">保存当前视角与设置</button>
+ <div class="row"><button id="loadView" class="wide">载入视角设置</button><input id="viewFile" type="file" accept="application/json,.json" hidden></div>
+ <div class="note">点击三维视图后，WASD 移动，左键拖动原地转头，Q / E 降升，Shift 加速。滚轮前后移动；中键、右键或 Shift + 左键平移。<br>H 隐藏面板，F 全屏，P 导出截图。<br>取消第一人称可恢复环绕旋转。截图只包含三维图。</div>
+ <div class="note" id="dataNote"></div>
+</aside>
+<main id="viewport"><canvas id="canvas" tabindex="0"></canvas><div id="toolbar"><button id="toggleUI">隐藏面板 H</button><button id="fullscreen">全屏 F</button></div><div id="busy">正在读取体素…</div><div id="status"></div><div id="help">WASD 移动 · 拖动转头 · Q/E 降升 · Shift 加速</div></main>
+<script id="metadata" type="application/json">__VOXEL_METADATA__</script>
+<script id="voxelData" type="application/octet-stream">__VOXEL_RLE_BASE64__</script>
+<script>
+'use strict';
+const META=JSON.parse(document.getElementById('metadata').textContent);
+const $=id=>document.getElementById(id);
+const canvas=$('canvas'), gl=canvas.getContext('webgl2',{antialias:true,alpha:true,preserveDrawingBuffer:true});
+const [NX,NY,NZ]=META.dimensions, STEP=META.voxelSize, ORIGIN=META.origin;
+const axisNames=['x','y','z'], fullBounds=[0,NX,0,NY,0,NZ];
+let bounds=fullBounds.slice(), requestId=0, currentId=0, desired=null, workerBusy=false, firstBuild=true;
+let meshes=[], quadCount=0, selectedCounts=[0,0,0], pendingRender=false;
+let az=-55*Math.PI/180, el=50*Math.PI/180, distance=65, target=[NX*STEP/2,NY*STEP/2,NZ*STEP/2];
+let hidden=false, controlsReady=false;
+const diagnostics=window.voxelViewer={metadata:META,ready:false,builds:0,lastError:null};
+function fail(err){diagnostics.lastError=String(err);$('busy').style.display='none';$('status').textContent=String(err);console.error(err);}
+window.addEventListener('error',event=>fail(event.message));
+if(!gl){$('viewport').innerHTML='<div class="error">当前浏览器未启用 WebGL 2，请用启用硬件加速的 Chrome / Edge 打开此文件。</div>';throw new Error('WebGL 2 unavailable');}
+const vs=`#version 300 es
+precision highp float;
+layout(location=0) in vec2 corner;
+layout(location=1) in vec4 cellFace;
+uniform mat4 mvp;
+uniform float stepSize;
+out vec2 uv;
+void main(){
+ int f=int(cellFace.w+.1); vec3 p=cellFace.xyz;
+ if(f<2){p.x+=float(f==1);p.y+=corner.x;p.z+=corner.y;}
+ else if(f<4){p.y+=float(f==3);p.x+=corner.x;p.z+=corner.y;}
+ else{p.z+=float(f==5);p.x+=corner.x;p.y+=corner.y;}
+ uv=corner;gl_Position=mvp*vec4(p*stepSize,1.0);
+}`;
+const fs=`#version 300 es
+precision highp float;
+in vec2 uv;
+uniform vec3 faceColor;
+uniform vec3 edgeColor;
+uniform float edgeWidth;
+out vec4 frag;
+void main(){
+ vec2 cellDistance=min(uv,1.0-uv)/max(fwidth(uv),vec2(1.e-7));
+ float d=min(cellDistance.x,cellDistance.y);
+ float border=edgeWidth>0.0?1.0-smoothstep(max(0.0,edgeWidth-.45),edgeWidth+.45,d):0.0;
+ frag=vec4(mix(faceColor,edgeColor,border),1.0);
+}`;
+function shader(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+const program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,vs));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,fs));gl.linkProgram(program);
+if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+const uniforms=Object.fromEntries(['mvp','stepSize','faceColor','edgeColor','edgeWidth'].map(k=>[k,gl.getUniformLocation(program,k)]));
+const cornerBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,cornerBuffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,1,1,0,0,1,1,0,1]),gl.STATIC_DRAW);
+gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);gl.disable(gl.CULL_FACE);gl.disable(gl.BLEND);gl.disable(gl.DITHER);
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+function normalize(a){const n=Math.hypot(...a);return a.map(x=>x/n);}
+function multiply(a,b){const c=new Float32Array(16);for(let j=0;j<4;j++)for(let i=0;i<4;i++)for(let k=0;k<4;k++)c[j*4+i]+=a[k*4+i]*b[j*4+k];return c;}
+function basis(){const z=[Math.cos(az)*Math.cos(el),Math.sin(az)*Math.cos(el),Math.sin(el)],x=normalize(cross([0,0,1],z));return{x,y:cross(z,x),z};}
+function eyePosition(){const {z}=basis();return target.map((t,i)=>t+z[i]*distance);}
+function viewMatrix(){const {x,y,z}=basis(),eye=eyePosition();return new Float32Array([x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-dot(x,eye),-dot(y,eye),-dot(z,eye),1]);}
+function translateCamera(delta){target=target.map((t,i)=>t+delta[i]);}
+function turnCamera(dx,dy){
+ const eye=eyePosition();
+ az-=dx*.006;el=Math.max(-Math.PI/2+.001,Math.min(Math.PI/2-.001,el+dy*.006));
+ // Keep the eye fixed while turning. Only the direction changes in first-person
+ // mode; the retained target is just a point along that direction, not a pivot.
+ if($('firstPerson').checked){const {z}=basis();target=eye.map((v,i)=>v-z[i]*distance);}
+}
+function projection(aspect){const near=.001,far=2000,tangent=Math.tan(22.5*Math.PI/180);if($('ortho').checked){const top=distance*tangent,right=top*aspect;return new Float32Array([1/right,0,0,0,0,1/top,0,0,0,0,-2/(far-near),0,0,0,-(far+near)/(far-near),1]);}const f=1/tangent;return new Float32Array([f/aspect,0,0,0,0,f,0,0,0,0,(far+near)/(near-far),-1,0,0,2*far*near/(near-far),0]);}
+function rgb(id){const hex=$(id).value;return[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255);}
+function draw(){
+ pendingRender=false;gl.viewport(0,0,canvas.width,canvas.height);gl.clearColor(1,1,1,$('transparent').checked?0:1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+ gl.useProgram(program);gl.uniformMatrix4fv(uniforms.mvp,false,multiply(projection(canvas.width/canvas.height),viewMatrix()));gl.uniform1f(uniforms.stepSize,STEP);
+ const scale=canvas.width/Math.max(1,canvas.clientWidth);gl.uniform1f(uniforms.edgeWidth,$('edges').checked?+$('edgeWidth').value*scale:0);
+ for(const mesh of meshes){gl.uniform3fv(uniforms.faceColor,rgb(mesh.state===2?'occFace':'unkFace'));gl.uniform3fv(uniforms.edgeColor,rgb(mesh.state===2?'occEdge':'unkEdge'));gl.bindVertexArray(mesh.vao);gl.drawArraysInstanced(gl.TRIANGLES,0,6,mesh.count);}
+ gl.bindVertexArray(null);
+ $('cameraPosition').textContent='位置 '+eyePosition().map((v,i)=>(v+ORIGIN[i]).toFixed(2)).join(' / ')+' m';
+}
+function renderSoon(){if(!pendingRender){pendingRender=true;requestAnimationFrame(draw);}}
+function resize(){const rect=$('viewport').getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.max(1,Math.round(rect.width*dpr));canvas.height=Math.max(1,Math.round(rect.height*dpr));renderSoon();}
+new ResizeObserver(resize).observe($('viewport'));
+function fit(){target=[0,1,2].map(i=>(bounds[2*i]+bounds[2*i+1])*STEP/2);const size=[0,1,2].map(i=>(bounds[2*i+1]-bounds[2*i])*STEP),{x,y}=basis();const w=size.reduce((s,d,i)=>s+Math.abs(x[i])*d,0),h=size.reduce((s,d,i)=>s+Math.abs(y[i])*d,0);distance=Math.max(h,w/(canvas.clientWidth/canvas.clientHeight))/.8284*1.12+size[2]*.4;renderSoon();}
+function replaceMeshes(groups){for(const m of meshes){gl.deleteBuffer(m.buffer);gl.deleteVertexArray(m.vao);}meshes=[];
+ for(const state of [0,2]){const cells=groups[state];if(!cells.length)continue;const vao=gl.createVertexArray(),buffer=gl.createBuffer();gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,cornerBuffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,cells,gl.STATIC_DRAW);gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,4,gl.UNSIGNED_SHORT,false,8,0);gl.vertexAttribDivisor(1,1);meshes.push({state,buffer,vao,count:cells.length/4});}gl.bindVertexArray(null);renderSoon();
+}
+// The worker holds the original three-state volume. Each emitted instance is
+// one original voxel face. It removes only faces hidden by other visible cells;
+// toggles and clipping rebuild the exact newly exposed faces, including caps.
+function workerMain(){
+ let a,nx,ny,nz,plane;
+ onmessage=({data:d})=>{
+  if(d.type==='init'){[nx,ny,nz]=d.dimensions;plane=nx*ny;a=new Uint8Array(nx*ny*nz);const runs=new DataView(d.runs);let offset=0;for(let i=0;i<runs.byteLength;i+=4){const p=runs.getUint32(i,true),n=p>>>2;a.fill(p&3,offset,offset+n);offset+=n;}if(offset!==a.length)throw new Error('Voxel length mismatch');postMessage({type:'init',length:a.length});return;}
+  const [x0,x1,y0,y1,z0,z1]=d.bounds,visible=[!!d.unknown,false,!!d.occupied],counts=[0,0,0];
+  const buffers=[new Uint16Array(65536),null,new Uint16Array(65536)],used=[0,0,0];
+  function face(s,x,y,z,f){if(used[s]+4>buffers[s].length){const b=new Uint16Array(buffers[s].length*2);b.set(buffers[s]);buffers[s]=b;}const p=used[s];buffers[s][p]=x;buffers[s][p+1]=y;buffers[s][p+2]=z;buffers[s][p+3]=f;used[s]+=4;}
+  for(let z=z0;z<z1;z++)for(let y=y0;y<y1;y++)for(let x=x0,i=z*plane+y*nx+x0;x<x1;x++,i++){
+   const s=a[i];counts[s]++;if(!visible[s])continue;
+   if(x===x0||!visible[a[i-1]])face(s,x,y,z,0);if(x===x1-1||!visible[a[i+1]])face(s,x,y,z,1);
+   if(y===y0||!visible[a[i-nx]])face(s,x,y,z,2);if(y===y1-1||!visible[a[i+nx]])face(s,x,y,z,3);
+   if(z===z0||!visible[a[i-plane]])face(s,x,y,z,4);if(z===z1-1||!visible[a[i+plane]])face(s,x,y,z,5);
+  }
+  const groups={0:buffers[0].subarray(0,used[0]),2:buffers[2].subarray(0,used[2])};postMessage({type:'mesh',id:d.id,groups,counts,bounds:d.bounds},[groups[0].buffer,groups[2].buffer]);
+ };
+}
+const workerURL=URL.createObjectURL(new Blob(['('+workerMain.toString()+')()'],{type:'application/javascript'}));
+const worker=new Worker(workerURL);URL.revokeObjectURL(workerURL);worker.onerror=e=>fail(e.message);
+function busy(value){$('busy').style.display=value?'block':'none';$('screenshot').disabled=value;}
+function requestBuild(){desired={type:'mesh',id:++requestId,bounds:bounds.slice(),occupied:$('occupied').checked,unknown:$('unknown').checked};busy(true);$('busy').textContent='正在更新体素…';if(controlsReady&&!workerBusy)sendBuild();}
+function sendBuild(){if(!desired)return;const request=desired;desired=null;workerBusy=true;currentId=request.id;worker.postMessage(request);}
+worker.onmessage=({data:d})=>{
+ if(d.type==='init'){controlsReady=true;diagnostics.decodedVoxels=d.length;sendBuild();return;}
+ workerBusy=false;
+ if(d.id===requestId){replaceMeshes(d.groups);selectedCounts=d.counts;quadCount=meshes.reduce((s,m)=>s+m.count,0);diagnostics.ready=true;diagnostics.builds++;diagnostics.quads=quadCount;diagnostics.counts=d.counts;diagnostics.bounds=d.bounds;busy(false);$('status').textContent=`${quadCount.toLocaleString()} 个方块面 · 5 cm / 格`;if(firstBuild){fit();firstBuild=false;}}
+ if(desired)sendBuild();
+};
+function updateRangeUI(){axisNames.forEach((axis,i)=>{for(const [j,end] of ['min','max'].entries()){const el=$(axis+end);el.min=j===0?0:1;el.max=META.dimensions[i]-(j===0?1:0);el.step=1;el.value=bounds[2*i+j];$(axis+end+'Value').textContent=(ORIGIN[i]+bounds[2*i+j]*STEP).toFixed(2)+' m';}});}
+function setBounds(value,autoFit=true){bounds=value.slice();updateRangeUI();requestBuild();if(autoFit)fit();}
+let rangeTimer;
+axisNames.forEach((axis,i)=>['min','max'].forEach((end,j)=>{$(axis+end).addEventListener('input',()=>{let v=+$(axis+end).value;if(j===0)v=Math.min(v,bounds[2*i+1]-1);else v=Math.max(v,bounds[2*i]+1);bounds[2*i+j]=v;updateRangeUI();clearTimeout(rangeTimer);rangeTimer=setTimeout(requestBuild,180);});}));
+for(const id of ['occupied','unknown'])$(id).onchange=requestBuild;
+for(const id of ['edges','occFace','occEdge','unkFace','unkEdge','transparent'])$(id).onchange=renderSoon;
+function updateNavigationUI(){
+ $('moveSpeedValue').textContent=(+$('moveSpeed').value).toFixed(1)+' m/s';
+ $('help').textContent=$('firstPerson').checked?'WASD 移动 · 拖动转头 · Q/E 降升 · Shift 加速':'拖动环绕 · 滚轮缩放 · WASD 移动';
+}
+$('firstPerson').onchange=()=>{if($('firstPerson').checked)$('ortho').checked=false;updateNavigationUI();renderSoon();};
+$('ortho').onchange=()=>{if($('ortho').checked)$('firstPerson').checked=false;updateNavigationUI();renderSoon();};
+$('moveSpeed').oninput=updateNavigationUI;
+$('edgeWidth').oninput=()=>{$('edgeValue').textContent=(+$('edgeWidth').value).toFixed(2)+' px';renderSoon();};
+$('fullRange').onclick=()=>setBounds(fullBounds);$('sceneRange').onclick=()=>setBounds(META.knownBounds);
+$('cutaway').onclick=()=>{const b=META.knownBounds.slice();b[5]=Math.max(1,Math.min(NZ,Math.round((2-ORIGIN[2])/STEP)));setBounds(b);};
+$('fit').onclick=fit;$('iso').onclick=()=>{az=-55*Math.PI/180;el=50*Math.PI/180;fit();};$('top').onclick=()=>{az=-Math.PI/2;el=Math.PI/2-.0001;fit();};$('front').onclick=()=>{az=-Math.PI/2;el=.0001;fit();};
+function toggleUI(){hidden=!hidden;document.body.classList.toggle('hidden-ui',hidden);$('toggleUI').textContent=hidden?'显示面板 H':'隐藏面板 H';resize();}
+function fullscreen(){if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen().catch(fail);}
+$('toggleUI').onclick=toggleUI;$('fullscreen').onclick=fullscreen;
+let dragging=null;
+canvas.oncontextmenu=e=>e.preventDefault();canvas.onpointerdown=e=>{canvas.focus({preventScroll:true});canvas.setPointerCapture(e.pointerId);dragging={id:e.pointerId,x:e.clientX,y:e.clientY,pan:e.button!==0||e.shiftKey};};
+canvas.onpointermove=e=>{if(!dragging||dragging.id!==e.pointerId)return;const dx=e.clientX-dragging.x,dy=e.clientY-dragging.y;dragging.x=e.clientX;dragging.y=e.clientY;if(dragging.pan){const {x,y}=basis(),scale=($('firstPerson').checked?Math.max(1,+$('moveSpeed').value*2):distance)*.8284/canvas.clientHeight;translateCamera(x.map((v,i)=>-dx*scale*v+dy*scale*y[i]));}else{turnCamera(dx,dy);}renderSoon();};
+canvas.onpointerup=canvas.onpointercancel=()=>dragging=null;
+canvas.addEventListener('wheel',e=>{e.preventDefault();if($('firstPerson').checked){const {z}=basis(),delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?canvas.clientHeight:1);translateCamera(z.map(v=>v*delta*.01*+$('moveSpeed').value));}else{distance=Math.max(.1,Math.min(500,distance*Math.exp(e.deltaY*.001)));}renderSoon();},{passive:false});
+
+// Movement is based on elapsed time, rather than keyboard auto-repeat. Clear
+// held keys on focus loss so switching tabs or editing a slider cannot cause
+// a stuck key to keep moving the camera.
+const movementCodes=new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE']);
+const heldKeys=new Set();let movementFrame=null,previousMovementTime=0;
+const editingControl=element=>!!element?.closest?.('input,select,textarea,[contenteditable="true"]');
+function stopMovement(){heldKeys.clear();if(movementFrame!==null)cancelAnimationFrame(movementFrame);movementFrame=null;previousMovementTime=0;}
+function moveCamera(dt){
+ const forward=Number(heldKeys.has('KeyW'))-Number(heldKeys.has('KeyS'));
+ const right=Number(heldKeys.has('KeyD'))-Number(heldKeys.has('KeyA'));
+ const up=Number(heldKeys.has('KeyE'))-Number(heldKeys.has('KeyQ'));
+ const {x,z}=basis();const delta=x.map((v,i)=>right*v-forward*z[i]+(i===2?up:0));
+ const length=Math.hypot(...delta);if(!length)return false;
+ const boost=heldKeys.has('ShiftLeft')||heldKeys.has('ShiftRight')?4:1;
+ const step=+$('moveSpeed').value*boost*dt/length;
+ translateCamera(delta.map(v=>v*step));return true;
+}
+function movementTick(now){
+ movementFrame=null;
+ const dt=Math.max(0,Math.min((now-previousMovementTime)/1000,.1));previousMovementTime=now;
+ if(moveCamera(dt))renderSoon();
+ if([...movementCodes].some(code=>heldKeys.has(code)))movementFrame=requestAnimationFrame(movementTick);
+}
+document.addEventListener('keydown',e=>{
+ if(e.isComposing||e.ctrlKey||e.metaKey||e.altKey||editingControl(e.target))return;
+ if(e.code==='ShiftLeft'||e.code==='ShiftRight'){heldKeys.add(e.code);return;}
+ if(movementCodes.has(e.code)){
+  e.preventDefault();heldKeys.add(e.code);
+  if(movementFrame===null){previousMovementTime=performance.now();movementFrame=requestAnimationFrame(movementTick);}return;
+ }
+ if(e.repeat)return;
+ if(e.code==='KeyH'){e.preventDefault();toggleUI();}
+ if(e.code==='KeyF'){e.preventDefault();fullscreen();}
+ if(e.code==='KeyP'){e.preventDefault();screenshot().catch(fail);}
+});
+document.addEventListener('keyup',e=>{heldKeys.delete(e.code);if(![...movementCodes].some(code=>heldKeys.has(code))){if(movementFrame!==null)cancelAnimationFrame(movementFrame);movementFrame=null;previousMovementTime=0;}});
+window.addEventListener('blur',()=>{stopMovement();dragging=null;});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){stopMovement();dragging=null;}});
+document.addEventListener('focusin',e=>{if(editingControl(e.target))stopMovement();});
+function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);}
+async function screenshot(){if(workerBusy||desired)return;const w=canvas.width,h=canvas.height;const outWidth=+$('exportSize').value;canvas.width=outWidth;canvas.height=Math.round(outWidth*h/w);draw();try{const blob=await new Promise(r=>canvas.toBlob(r,'image/png'));if(!blob)throw new Error('截图导出失败');download(blob,'kujiale_0003_70pct_voxels_'+new Date().toISOString().replace(/[:.]/g,'-')+'.png');}finally{canvas.width=w;canvas.height=h;draw();}}
+$('screenshot').onclick=()=>screenshot().catch(fail);
+const settingsIDs=['occupied','unknown','edges','ortho','firstPerson','moveSpeed','transparent','occFace','occEdge','unkFace','unkEdge','edgeWidth','exportSize'];
+function currentView(){return{schema:'voxroom-voxel-view-v1',sourceSha256:META.sourceSha256,az,el,distance,target,cameraPosition:eyePosition(),bounds,settings:Object.fromEntries(settingsIDs.map(id=>[id,$(id).type==='checkbox'?$(id).checked:$(id).value]))};}
+$('saveView').onclick=()=>download(new Blob([JSON.stringify(currentView(),null,2)],{type:'application/json'}),'kujiale_0003_70pct_voxel_view.json');
+$('loadView').onclick=()=>$('viewFile').click();$('viewFile').onchange=async()=>{try{const v=JSON.parse(await $('viewFile').files[0].text());if(v.schema!=='voxroom-voxel-view-v1'||v.sourceSha256!==META.sourceSha256)throw new Error('视角文件与当前快照不匹配');if(![v.az,v.el,v.distance,...v.target,...v.bounds].every(Number.isFinite))throw new Error('视角文件参数无效');if(v.distance<=0||v.bounds.length!==6||axisNames.some((_,i)=>v.bounds[i*2]<0||v.bounds[i*2+1]>META.dimensions[i]||v.bounds[i*2]>=v.bounds[i*2+1]||!Number.isInteger(v.bounds[i*2])||!Number.isInteger(v.bounds[i*2+1])))throw new Error('视角显示范围无效');stopMovement();az=v.az;el=v.el;distance=v.distance;target=v.target;$('firstPerson').checked=!!v.settings.firstPerson;for(const id of settingsIDs){if(!(id in v.settings))continue;if($(id).type==='checkbox')$(id).checked=!!v.settings[id];else $(id).value=v.settings[id];}if($('firstPerson').checked)$('ortho').checked=false;updateNavigationUI();setBounds(v.bounds,false);renderSoon();}catch(e){fail(e);}finally{$('viewFile').value='';}};
+diagnostics.getView=currentView;diagnostics.capture=()=>{draw();return canvas.toDataURL('image/png');};diagnostics.setBounds=b=>setBounds(b);diagnostics.fit=fit;
+$('dataNote').textContent=`实际探索 ${(META.coverage*100).toFixed(3)}% · ${NX} × ${NY} × ${NZ} 格。原始快照完整保存在此 HTML 中，可离线打开。`;
+updateNavigationUI();updateRangeUI();resize();requestBuild();
+const text=$('voxelData').textContent.trim(),binary=atob(text),bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+worker.postMessage({type:'init',dimensions:META.dimensions,runs:bytes.buffer},[bytes.buffer]);
+</script>
+</body>
+</html>

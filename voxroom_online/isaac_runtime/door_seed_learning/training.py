@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -51,7 +52,7 @@ class TrainingConfig:
     target_recall: float = 0.98
     max_pos_weight: float = 10.0
     num_workers: int = 0
-    snapshot_cache_size: int = 0
+    snapshot_cache_size: int = 6
     seed: int = 0
     device: str = "cuda:0"
     grouped_coordinate_sampling: bool = True
@@ -68,8 +69,10 @@ class TrainingConfig:
             raise ValueError("early_stopping_min_delta must be non-negative")
         if int(self.snapshot_cache_size) < 0:
             raise ValueError("training snapshot_cache_size must be non-negative")
-        if str(self.checkpoint_selection_mode) not in {"operating_metric", "validation_loss"}:
-            raise ValueError("checkpoint_selection_mode must be operating_metric or validation_loss")
+        if str(self.checkpoint_selection_mode) not in {"operating_metric", "fixed_f1", "validation_loss"}:
+            raise ValueError(
+                "checkpoint_selection_mode must be operating_metric, fixed_f1, or validation_loss"
+            )
         if str(self.threshold_selection_mode) not in {"target_recall", "fixed"}:
             raise ValueError("threshold_selection_mode must be target_recall or fixed")
         if not 0.0 <= float(self.fixed_keep_threshold) <= 1.0:
@@ -150,6 +153,18 @@ def fixed_threshold_checkpoint_selection_score(
     return values
 
 
+def fixed_threshold_f1_checkpoint_selection_score(
+    *,
+    f1: float,
+    precision: float,
+    pr_auc: float,
+) -> tuple[float, float, float]:
+    values = (float(f1), float(precision), float(pr_auc))
+    if not all(np.isfinite(value) and 0.0 <= value <= 1.0 for value in values):
+        raise ValueError("checkpoint selection metrics must be finite values in [0,1]")
+    return values
+
+
 def validation_loss_checkpoint_selection_score(
     *,
     validation_loss: float,
@@ -190,6 +205,7 @@ def train_classifier(
     model_config: DoorSeedModelConfig | Mapping[str, object] | None = None,
     training_config: TrainingConfig | Mapping[str, object] | None = None,
     source_root: str | Path | None = None,
+    initial_checkpoint_path: str | Path | None = None,
 ) -> dict[str, object]:
     import torch
     from torch import nn
@@ -201,6 +217,13 @@ def train_classifier(
     index = Path(index_path)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    model_mapping = (
+        model_config.to_dict()
+        if isinstance(model_config, DoorSeedModelConfig)
+        else dict(model_config or {})
+    )
+    use_voxel_branch = bool(model_mapping.get("use_voxel_branch", True))
+    use_context_branch = bool(model_mapping.get("use_context_branch", True))
     train_dataset = DoorSeedDataset(
         index,
         split="train",
@@ -210,6 +233,8 @@ def train_classifier(
         rotation_degrees=train_cfg.train_rotation_degrees,
         mirror_lr_once=bool(train_cfg.train_mirror_lr_once),
         seed=int(train_cfg.seed),
+        use_voxel_branch=use_voxel_branch,
+        use_context_branch=use_context_branch,
     )
     val_dataset = DoorSeedDataset(
         index,
@@ -219,12 +244,21 @@ def train_classifier(
         augment=False,
         rotation_degrees=(0,),
         seed=int(train_cfg.seed),
+        use_voxel_branch=use_voxel_branch,
+        use_context_branch=use_context_branch,
     )
     train_snapshot_count = len({str(row["snapshot_path"]) for row in train_dataset.rows})
     val_snapshot_count = len({str(row["snapshot_path"]) for row in val_dataset.rows})
     requested_cache_size = int(train_cfg.snapshot_cache_size)
-    train_dataset.cache_size = requested_cache_size or max(1, train_snapshot_count)
-    val_dataset.cache_size = requested_cache_size or max(1, val_snapshot_count)
+    # A zero value used to retain every referenced 3D snapshot.  Multiple
+    # paused/running experiments could therefore hold several complete copies
+    # of the voxel dataset in RAM and make the host unresponsive.  Keep zero as
+    # a backwards-compatible "automatic" value, but bound it to the normal
+    # dataset cache size instead of expanding it to the full split.
+    automatic_cache_size = 6
+    effective_cache_size = requested_cache_size or automatic_cache_size
+    train_dataset.cache_size = min(effective_cache_size, max(1, train_snapshot_count))
+    val_dataset.cache_size = min(effective_cache_size, max(1, val_snapshot_count))
     if not len(train_dataset) or not len(val_dataset):
         raise ValueError("training requires non-empty scene-level train and val splits")
     geometry = _dataset_geometry(train_dataset.rows + val_dataset.rows)
@@ -238,6 +272,72 @@ def train_classifier(
     if int(model_cfg.z_count) != int(geometry["z_count"]):
         raise ValueError("model z_count does not match dataset")
     model = build_door_seed_model(model_cfg)
+    initial_checkpoint: dict[str, object] | None = None
+    if initial_checkpoint_path is not None:
+        checkpoint_path = Path(initial_checkpoint_path).expanduser().resolve()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                "initial door seed checkpoint not found: %s" % checkpoint_path
+            )
+        load_kwargs = {"map_location": "cpu"}
+        if "weights_only" in inspect.signature(torch.load).parameters:
+            load_kwargs["weights_only"] = True
+        loaded = torch.load(checkpoint_path, **load_kwargs)
+        if not isinstance(loaded, dict):
+            raise ValueError("initial door seed checkpoint must be a mapping")
+        required = {
+            "model_state_dict",
+            "model_config",
+            "model_architecture_version",
+            "preprocessor_version",
+            "context_source",
+            "z_count",
+            "z_min_m",
+            "z_resolution_m",
+            "xy_resolution_m",
+            "z_centers_sha256",
+            "raw_seed_config_hash",
+            "input_semantics_hash",
+            "height_scale_m",
+        }
+        missing = sorted(required - set(loaded))
+        if missing:
+            raise ValueError(
+                "initial door seed checkpoint missing metadata: %s"
+                % ", ".join(missing)
+            )
+        if loaded["model_architecture_version"] != MODEL_ARCHITECTURE_VERSION:
+            raise ValueError("initial door seed checkpoint model architecture mismatch")
+        if loaded["preprocessor_version"] != PREPROCESSOR_VERSION:
+            raise ValueError("initial door seed checkpoint preprocessor mismatch")
+        if str(loaded["context_source"]) != str(context_source):
+            raise ValueError("initial door seed checkpoint context_source mismatch")
+        loaded_model_cfg = DoorSeedModelConfig.from_mapping(loaded["model_config"])
+        if loaded_model_cfg.to_dict() != model_cfg.to_dict():
+            raise ValueError("initial door seed checkpoint model_config mismatch")
+        geometry_checks = {
+            "z_count": int,
+            "z_min_m": float,
+            "z_resolution_m": float,
+            "xy_resolution_m": float,
+            "z_centers_sha256": str,
+            "raw_seed_config_hash": str,
+            "input_semantics_hash": str,
+        }
+        for key, cast in geometry_checks.items():
+            if cast(loaded[key]) != cast(geometry[key]):
+                raise ValueError(
+                    "initial door seed checkpoint geometry mismatch: %s" % key
+                )
+        if abs(float(loaded["height_scale_m"]) - float(height_scale_m)) > 1.0e-6:
+            raise ValueError("initial door seed checkpoint height_scale_m mismatch")
+        model.load_state_dict(loaded["model_state_dict"], strict=True)
+        initial_checkpoint = loaded
+        print(
+            "[door-seed-train] initialized model weights from %s source_epoch=%s"
+            % (checkpoint_path, str(loaded.get("epoch", "unknown"))),
+            flush=True,
+        )
     device = torch.device(str(train_cfg.device))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA training requested but torch.cuda.is_available() is false")
@@ -262,12 +362,14 @@ def train_classifier(
         shuffle=train_sampler is None,
         sampler=train_sampler,
         num_workers=int(train_cfg.num_workers),
+        persistent_workers=int(train_cfg.num_workers) > 0,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=int(train_cfg.batch_size),
         shuffle=False,
         num_workers=int(train_cfg.num_workers),
+        persistent_workers=int(train_cfg.num_workers) > 0,
     )
     train_samples_per_epoch = len(train_sampler) if train_sampler is not None else len(train_dataset)
     augmentation_manifest = {
@@ -368,6 +470,16 @@ def train_classifier(
                 accuracy=float(selected["accuracy"]),
                 f1=float(selected["f1"]),
             )
+        elif str(train_cfg.checkpoint_selection_mode) == "fixed_f1":
+            if str(train_cfg.threshold_selection_mode) != "fixed":
+                raise ValueError("checkpoint_selection_mode=fixed_f1 requires threshold_selection_mode=fixed")
+            checkpoint_selection_metric = "f1_at_fixed_threshold"
+            validation_score = (float(selected["f1"]), float(selected["precision"]))
+            selection_score = fixed_threshold_f1_checkpoint_selection_score(
+                f1=float(selected["f1"]),
+                precision=float(selected["precision"]),
+                pr_auc=float(rank["pr_auc"]),
+            )
         elif str(train_cfg.threshold_selection_mode) == "fixed":
             checkpoint_selection_metric = "accuracy_at_fixed_threshold"
             validation_score = (float(selected["accuracy"]), float(selected["f1"]))
@@ -410,6 +522,7 @@ def train_classifier(
             row["recall_rejection"] = recall_rejection_table(labels, probabilities)
         history.append(row)
         write_json_atomic(output / "training_history.json", history)
+        _write_loss_curve(output / "training_loss.png", history)
         print(
             "[door-seed-train] epoch=%d train_loss=%.8f val_loss=%.8f threshold=%.9f "
             "accuracy=%.6f f1=%.6f reject_coverage=%.6f reject_acc=%.6f pr_auc=%.6f "
@@ -474,6 +587,8 @@ def train_classifier(
         "checkpoint_selection_metric": (
             "validation_loss"
             if str(train_cfg.checkpoint_selection_mode) == "validation_loss"
+            else "f1_at_fixed_threshold"
+            if str(train_cfg.checkpoint_selection_mode) == "fixed_f1"
             else "accuracy_at_fixed_threshold"
             if str(train_cfg.threshold_selection_mode) == "fixed"
             else "negative_rejection_rate"
@@ -496,6 +611,21 @@ def train_classifier(
         "early_stopping_patience": int(train_cfg.early_stopping_patience),
         "early_stopping_min_delta": float(train_cfg.early_stopping_min_delta),
         "best_train_loss": float(stopper.best_train_loss),
+        "initial_checkpoint_path": (
+            str(Path(initial_checkpoint_path).expanduser().resolve())
+            if initial_checkpoint_path is not None
+            else None
+        ),
+        "initial_checkpoint_epoch": (
+            int(initial_checkpoint.get("epoch", 0))
+            if initial_checkpoint is not None
+            else None
+        ),
+        "initial_checkpoint_achieved_f1": (
+            float(initial_checkpoint.get("achieved_f1", 0.0))
+            if initial_checkpoint is not None
+            else None
+        ),
         "stop_reason": (
             "%s_no_improvement_%d_epochs"
             % (str(train_cfg.early_stopping_metric), int(train_cfg.early_stopping_patience))
@@ -653,4 +783,53 @@ def _torch_save_atomic(payload: object, path: Path) -> None:
     torch.save(payload, temp)
     with temp.open("rb") as handle:
         os.fsync(handle.fileno())
+    os.replace(temp, path)
+
+
+def _write_loss_curve(path: Path, history: list[Mapping[str, object]]) -> None:
+    """Write a dependency-light live train/validation loss plot."""
+
+    from PIL import Image, ImageDraw
+
+    width, height = 1200, 700
+    left, top, right, bottom = 90, 45, 35, 75
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    x0, y0 = left, height - bottom
+    x1, y1 = width - right, top
+    draw.line((x0, y0, x1, y0), fill=(40, 40, 40), width=2)
+    draw.line((x0, y0, x0, y1), fill=(40, 40, 40), width=2)
+    train = [float(row["train_loss"]) for row in history]
+    val = [float(row["val_loss"]) for row in history]
+    values = [value for value in (*train, *val) if np.isfinite(value)]
+    ymax = max(values, default=1.0)
+    ymax = max(ymax * 1.05, 1e-6)
+
+    def points(series: list[float]) -> list[tuple[float, float]]:
+        denom = max(1, len(series) - 1)
+        return [
+            (
+                x0 + (x1 - x0) * index / denom,
+                y0 - (y0 - y1) * max(0.0, min(ymax, value)) / ymax,
+            )
+            for index, value in enumerate(series)
+        ]
+
+    train_points = points(train)
+    val_points = points(val)
+    if len(train_points) == 1:
+        draw.ellipse((train_points[0][0] - 3, train_points[0][1] - 3, train_points[0][0] + 3, train_points[0][1] + 3), fill=(30, 100, 220))
+        draw.ellipse((val_points[0][0] - 3, val_points[0][1] - 3, val_points[0][0] + 3, val_points[0][1] + 3), fill=(220, 70, 45))
+    else:
+        draw.line(train_points, fill=(30, 100, 220), width=3)
+        draw.line(val_points, fill=(220, 70, 45), width=3)
+    draw.text((left, 12), "DoorSeed classifier loss", fill=(20, 20, 20))
+    draw.text((x1 - 215, 14), "train", fill=(30, 100, 220))
+    draw.text((x1 - 115, 14), "validation", fill=(220, 70, 45))
+    draw.text((8, y1), "%.5f" % ymax, fill=(50, 50, 50))
+    draw.text((8, y0 - 10), "0", fill=(50, 50, 50))
+    draw.text((x0, y0 + 25), "epoch 1", fill=(50, 50, 50))
+    draw.text((x1 - 90, y0 + 25), "epoch %d" % len(history), fill=(50, 50, 50))
+    temp = path.with_name(path.name + ".tmp.png")
+    image.save(temp)
     os.replace(temp, path)

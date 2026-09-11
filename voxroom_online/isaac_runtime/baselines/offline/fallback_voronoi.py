@@ -10,7 +10,10 @@ import numpy as np
 from scipy import ndimage
 
 from voxroom_online.isaac_runtime.baselines.data_contract import resolve_map_info
-from voxroom_online.isaac_runtime.baselines.mask_io import relabel_consecutive
+from voxroom_online.isaac_runtime.baselines.mask_io import (
+    build_segmentation_domain_from_source,
+    relabel_consecutive,
+)
 
 from .fallback_utils import draw_grid_line, label_components, nearest_seed_fill
 
@@ -61,27 +64,8 @@ class CriticalLine:
 def build_voronoi_free_mask(arrays: Mapping[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
     """Build the IPA/Voronoi accessible domain; unknown is never marked free."""
 
-    shape = _infer_shape(arrays)
-    candidate, candidate_key = _first_bool_array(
-        arrays,
-        (
-            "navigation_free_room_domain",
-            "observed_free_mask",
-            "voxel_nav_free_xy",
-            "vertical_free_room_domain",
-            "voxel_vertical_free_xy",
-        ),
-        shape,
-        require_any=True,
-    )
-    if candidate is None:
-        occupancy, occupancy_key = _first_bool_array(arrays, ("occupancy_map", "voxel_nav_occupied_xy"), shape)
-        if occupancy is None:
-            candidate = np.zeros(shape, dtype=bool)
-            candidate_key = "missing_free_source"
-        else:
-            candidate = ~occupancy
-            candidate_key = "not_%s" % occupancy_key
+    candidate, candidate_key = build_segmentation_domain_from_source(arrays)
+    shape = candidate.shape
 
     unknown, unknown_key = _first_bool_array(arrays, ("unknown_mask", "voxel_nav_unknown_xy", "voxel_unknown_xy"), shape)
     obstacle, obstacle_key = _first_bool_array(arrays, ("obstacle_mask", "occupancy_map", "voxel_nav_occupied_xy", "voxel_wall_xy"), shape)
@@ -95,7 +79,10 @@ def build_voronoi_free_mask(arrays: Mapping[str, Any]) -> tuple[np.ndarray, dict
     candidate = np.asarray(candidate, dtype=bool)
     unknown = np.asarray(unknown, dtype=bool)
     obstacle = np.asarray(obstacle, dtype=bool)
-    free = candidate & ~unknown & ~obstacle
+    # The shared segmentation domain is already a checkpoint-clipped
+    # Vertical-Free mask.  Do not replace it with navigation free or subtract
+    # a lower-height navigation obstacle layer here.
+    free = candidate.copy()
     metadata = {
         "free_source": str(candidate_key),
         "unknown_source": str(unknown_key),

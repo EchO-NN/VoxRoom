@@ -1,10 +1,12 @@
 cff-version: 1.2.0
-title: "VoxRoom"
-message: "If you use VoxRoom, please cite the accompanying paper."
+message: "Please cite this software when using the code. The accompanying VoxRoom manuscript is submitted to ICRA 2027 and under review; final paper metadata will be added when available."
 type: software
+title: "VoxRoom: Room Segmentation from Partial Observations during Robot Exploration"
 authors:
-  - family-names: "TBD"
-    given-names: "TBD"
-repository-code: "https://github.com/TBD/VoxRoom"
+  - name: "EchO-NN"
+    email: "2579947814@qq.com"
+    website: "https://github.com/EchO-NN"
+repository-code: "https://github.com/EchO-NN/VoxRoom"
+url: "https://github.com/EchO-NN/VoxRoom"
+license: MIT
 version: "0.1.0"
-

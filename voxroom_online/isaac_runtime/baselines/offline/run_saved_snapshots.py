@@ -14,12 +14,15 @@ from ..snapshot_replay import baseline_snapshot_output_path, iter_scene_dirs, it
 from ...comparison.metadata_gate import assert_main_experiment_metadata
 from .base import BaselineResult, MissingOriginalImplementationError
 from .dude_runner import DudeIncrementalRunner
+from .gomez_runner import GomezIncrementalRunner
 from .fallback_voronoi_width_jump import segment_snapshot_arrays as segment_voronoi_width_jump
 from .ipa_runner import IpaRoomSegmentationRunner
 from .rose2_runner import Rose2Runner
 
 BASELINE_CHOICES = (
     "dude_incremental",
+    "dude_offline",
+    "gomez_incremental",
     "rose2",
     "morphological",
     "distance_transform",
@@ -50,17 +53,19 @@ class WidthJumpVoronoiRunner:
 def make_runner(name: str, args: argparse.Namespace):
     ros_setup = getattr(args, "ros_baseline_setup", None)
     ros_python = getattr(args, "ros_baseline_python", None)
-    if name == "dude_incremental":
+    if name in {"dude_incremental", "dude_offline"}:
         return DudeIncrementalRunner(
             repo_root=Path(args.dude_repo_root) if args.dude_repo_root else None,
             concavity_threshold_m=float(args.dude_concavity_threshold_m),
-            use_incremental=True,
+            use_incremental=name == "dude_incremental",
             fallback_python=bool(args.fallback_python),
             map_resolution_m=args.map_resolution_m,
             ros_setup=ros_setup,
             ros_python=ros_python,
             dude_ws=Path(args.dude_ws) if getattr(args, "dude_ws", None) else None,
         )
+    if name == "gomez_incremental":
+        return GomezIncrementalRunner(map_resolution_m=args.map_resolution_m)
     if name == "rose2":
         return Rose2Runner(
             ros_workspace=Path(args.rose2_ros_workspace) if args.rose2_ros_workspace else None,
@@ -181,7 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--rose2-ros-workspace")
     parser.add_argument("--rose2-launch-file", default="ROSE.launch")
     parser.add_argument("--dude-repo-root")
-    parser.add_argument("--dude-concavity-threshold-m", type=float, default=3.0)
+    parser.add_argument("--dude-concavity-threshold-m", type=float, default=2.5)
     parser.add_argument("--provenance-out")
     args = parser.parse_args(argv)
     try:

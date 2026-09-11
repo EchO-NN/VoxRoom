@@ -23,6 +23,7 @@ class DoorSeedModelConfig:
     transformer_dropout: float = 0.1
     group_norm_groups: int = 8
     classifier_dropout: float = 0.2
+    use_voxel_branch: bool = True
     use_context_branch: bool = True
     architecture_version: str = MODEL_ARCHITECTURE_VERSION
 
@@ -37,6 +38,8 @@ class DoorSeedModelConfig:
             raise ValueError("column_channels must be divisible by transformer_heads")
         if int(self.group_norm_groups) <= 0:
             raise ValueError("group_norm_groups must be positive")
+        if not bool(self.use_voxel_branch) and not bool(self.use_context_branch):
+            raise ValueError("at least one model input branch must be enabled")
         for channels in (self.column_channels, 40, 72, 112):
             if int(channels) % int(self.group_norm_groups) != 0:
                 raise ValueError("all convolution channels must be divisible by group_norm_groups")
@@ -103,32 +106,40 @@ def _model_class():
             self.model_config = model_config
             groups = int(model_config.group_norm_groups)
             channels = int(model_config.column_channels)
-            self.column_stem = nn.Sequential(
-                nn.Conv1d(4, channels, kernel_size=5, padding=2),
-                nn.GroupNorm(groups, channels),
-                nn.GELU(),
-                Residual1d(channels, groups),
-            )
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=channels,
-                nhead=int(model_config.transformer_heads),
-                dim_feedforward=int(model_config.transformer_feedforward),
-                dropout=float(model_config.transformer_dropout),
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-            )
-            self.column_transformer = nn.TransformerEncoder(encoder_layer, num_layers=int(model_config.transformer_layers))
-            self.local_xy = nn.Sequential(
-                nn.Conv2d(2 * channels, 72, kernel_size=3, padding=1),
-                nn.GroupNorm(groups, 72),
-                nn.GELU(),
-                Residual2d(72, groups),
-                nn.Conv2d(72, 112, kernel_size=3, stride=2, padding=1),
-                nn.GroupNorm(groups, 112),
-                nn.GELU(),
-                Residual2d(112, groups),
-            )
+            if bool(model_config.use_voxel_branch):
+                self.column_stem = nn.Sequential(
+                    nn.Conv1d(4, channels, kernel_size=5, padding=2),
+                    nn.GroupNorm(groups, channels),
+                    nn.GELU(),
+                    Residual1d(channels, groups),
+                )
+                encoder_layer = nn.TransformerEncoderLayer(
+                    d_model=channels,
+                    nhead=int(model_config.transformer_heads),
+                    dim_feedforward=int(model_config.transformer_feedforward),
+                    dropout=float(model_config.transformer_dropout),
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=True,
+                )
+                self.column_transformer = nn.TransformerEncoder(
+                    encoder_layer,
+                    num_layers=int(model_config.transformer_layers),
+                )
+                self.local_xy = nn.Sequential(
+                    nn.Conv2d(2 * channels, 72, kernel_size=3, padding=1),
+                    nn.GroupNorm(groups, 72),
+                    nn.GELU(),
+                    Residual2d(72, groups),
+                    nn.Conv2d(72, 112, kernel_size=3, stride=2, padding=1),
+                    nn.GroupNorm(groups, 112),
+                    nn.GELU(),
+                    Residual2d(112, groups),
+                )
+            else:
+                self.column_stem = None
+                self.column_transformer = None
+                self.local_xy = None
             if bool(model_config.use_context_branch):
                 self.context_xy = nn.Sequential(
                     nn.Conv2d(3, 40, kernel_size=3, padding=1),
@@ -146,7 +157,10 @@ def _model_class():
                 )
             else:
                 self.context_xy = None
-            fusion_size = 448 if bool(model_config.use_context_branch) else 224
+            fusion_size = 224 * (
+                int(bool(model_config.use_voxel_branch))
+                + int(bool(model_config.use_context_branch))
+            )
             self.classifier = nn.Sequential(
                 nn.Linear(fusion_size, 160),
                 nn.GELU(),
@@ -158,29 +172,56 @@ def _model_class():
             )
 
         def forward(self, voxel, context=None):
-            if voxel.ndim != 5:
-                raise ValueError("voxel input must have shape [B,4,Z,H,W]")
-            batch, channels, z_count, height, width = voxel.shape
-            expected_local = int(self.model_config.local_patch_size)
-            if channels != 4 or z_count != int(self.model_config.z_count) or (height, width) != (expected_local, expected_local):
-                raise ValueError("voxel input shape does not match model config")
-            columns = voxel.permute(0, 3, 4, 1, 2).reshape(batch * height * width, channels, z_count)
-            columns = self.column_stem(columns).transpose(1, 2)
-            columns = self.column_transformer(columns)
-            pooled = torch.cat((columns.mean(dim=1), columns.amax(dim=1)), dim=1)
-            local_map = pooled.reshape(batch, height, width, -1).permute(0, 3, 1, 2)
-            local_feature = self._global_mean_max(self.local_xy(local_map))
-            if self.context_xy is None:
-                fused = local_feature
-            else:
+            local_map = None
+            if self.local_xy is not None:
+                if voxel is None or voxel.ndim != 5:
+                    raise ValueError("voxel input must have shape [B,4,Z,H,W]")
+                batch, channels, z_count, height, width = voxel.shape
+                expected_local = int(self.model_config.local_patch_size)
+                if channels != 4 or z_count != int(self.model_config.z_count) or (height, width) != (expected_local, expected_local):
+                    raise ValueError("voxel input shape does not match model config")
+                columns = voxel.permute(0, 3, 4, 1, 2).reshape(batch * height * width, channels, z_count)
+                pooled = self.encode_columns(columns)
+                local_map = pooled.reshape(batch, height, width, -1).permute(0, 3, 1, 2)
+            return self.forward_encoded(local_map, context)
+
+        def encode_columns(self, columns):
+            """Independent [N,4,Z] columns -> [N,2*C]; no XY-position dependency.
+
+            This remains differentiable for ordinary training. Only the inference
+            engine may memoize its outputs, with dropout disabled and no gradients.
+            Module names and checkpoint parameter keys are unchanged.
+            """
+            if self.column_stem is None:
+                raise ValueError("model has no voxel branch")
+            if columns.ndim != 3 or tuple(columns.shape[1:]) != (4, int(self.model_config.z_count)):
+                raise ValueError("column input must have shape [N,4,Z]")
+            encoded = self.column_stem(columns).transpose(1, 2)
+            encoded = self.column_transformer(encoded)
+            return torch.cat((encoded.mean(dim=1), encoded.amax(dim=1)), dim=1)
+
+        def forward_encoded(self, local_map, context=None):
+            """Run the unchanged XY CNNs/head on spatially assembled column features."""
+            features = []
+            batch = None
+            if self.local_xy is not None:
+                size = int(self.model_config.local_patch_size)
+                expected = (2 * int(self.model_config.column_channels), size, size)
+                if local_map is None or local_map.ndim != 4 or tuple(local_map.shape[1:]) != expected:
+                    raise ValueError("encoded local input must have shape [B,2*C,H,W]")
+                batch = local_map.shape[0]
+                features.append(self._global_mean_max(self.local_xy(local_map)))
+            if self.context_xy is not None:
                 expected_context = int(self.model_config.context_patch_size)
                 if context is None or context.ndim != 4 or tuple(context.shape[1:]) != (3, expected_context, expected_context):
                     raise ValueError(
                         "context input must have shape [B,3,%d,%d]"
                         % (expected_context, expected_context)
                     )
-                context_feature = self._global_mean_max(self.context_xy(context))
-                fused = torch.cat((local_feature, context_feature), dim=1)
+                if batch is not None and int(context.shape[0]) != int(batch):
+                    raise ValueError("voxel and context batch sizes do not match")
+                features.append(self._global_mean_max(self.context_xy(context)))
+            fused = features[0] if len(features) == 1 else torch.cat(features, dim=1)
             return self.classifier(fused)
 
         @staticmethod

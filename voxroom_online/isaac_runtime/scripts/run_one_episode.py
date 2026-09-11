@@ -5352,6 +5352,7 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
             show_room_proposals=bool(args.show_room_proposals),
             show_room_masks=bool(args.show_room_masks),
             show_room_labels=bool(args.show_room_labels),
+            show_tvars_original_mask=bool(args.show_tvars_original_mask),
             show_frontier_member_cells=bool(args.show_frontier_member_cells),
             show_object_nodes=bool(args.show_object_nodes),
             show_candidate_markers=bool(args.show_candidate_markers),
@@ -6680,8 +6681,31 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                     event,
                     explored_mask=roomseg_coverage_explored_runtime,
                 )
+                configured_full_voxel_milestones = getattr(
+                    args, "roomseg_full_voxel_milestones", None
+                )
+                include_full_voxel = (
+                    configured_full_voxel_milestones is None
+                    or (
+                        event.threshold is not None
+                        and any(
+                            math.isclose(
+                                float(event.threshold),
+                                float(threshold),
+                                rel_tol=0.0,
+                                abs_tol=1.0e-9,
+                            )
+                            for threshold in configured_full_voxel_milestones
+                        )
+                    )
+                )
+                full_voxel_arrays = (
+                    strict_voxel_snapshot_arrays(mapper)
+                    if include_full_voxel
+                    else {}
+                )
                 extra_arrays = {
-                    **strict_voxel_snapshot_arrays(mapper),
+                    **full_voxel_arrays,
                     **_roomseg_memory_snapshot_arrays(room_segmenter),
                     **_roomseg_observation_snapshot_arrays(
                         baseline_obs,
@@ -6695,6 +6719,9 @@ def run_episode_isaac_closed_loop(episode: dict, args) -> dict:
                     "roomseg_eval_navigation_source": np.asarray(nav_source),
                     "roomseg_eval_coordinate_frame": np.asarray(
                         "voxroom_runtime_grid_world_aligned"
+                    ),
+                    "roomseg_eval_full_voxel_included": np.asarray(
+                        include_full_voxel, dtype=np.bool_
                     ),
                 }
                 source_dump = save_roomseg_layer_dump(
@@ -12152,6 +12179,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--door-seed-collection-root", default=None)
     parser.add_argument("--door-seed-checkpoint", default=None)
     parser.add_argument(
+        "--door-seed-allow-source-code-hash-mismatch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Allow only the checkpoint source-code hash to differ; all runtime "
+            "geometry and input-semantics metadata remain strictly validated."
+        ),
+    )
+    parser.add_argument(
         "--door-seed-raw-source",
         choices=["voxroom", "voxroom_tvars_vertical_union"],
         default=None,
@@ -12211,6 +12247,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--roomseg-coverage-milestones",
         default="20,40,60,70,80,90",
         help="Strictly increasing coverage percentages (or fractions).",
+    )
+    parser.add_argument(
+        "--roomseg-full-voxel-milestones",
+        default=None,
+        help=(
+            "Coverage percentages (or fractions) whose VoxRoom snapshots include "
+            "the complete 3D voxel tensors. Omit to preserve the legacy behavior "
+            "of including them at every milestone and at termination."
+        ),
     )
     parser.add_argument("--roomseg-coverage-output-dir", default=None)
     parser.add_argument("--live-roomseg-baseline", choices=["none", "topology_visual_active", "tvars_original_isaac"], default="none")
@@ -12375,6 +12420,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--show-room-proposals", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-room-masks", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-room-labels", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--show-tvars-original-mask",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--voxroom-viz-map-base-layer", dest="voxroom_viz_map_base_layer", default=None, choices=["default", "vertical_free"])
     parser.add_argument("--show-frontier-member-cells", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--show-object-nodes", action=argparse.BooleanOptionalAction, default=None)
@@ -12514,6 +12564,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.show_room_labels
         if args.show_room_labels is not None
         else get_nested(cfg, "visualization.show_room_labels", True)
+    )
+    args.show_tvars_original_mask = bool(
+        args.show_tvars_original_mask
+        if args.show_tvars_original_mask is not None
+        else get_nested(cfg, "visualization.show_tvars_original_mask", True)
     )
     args.show_frontier_member_cells = bool(
         args.show_frontier_member_cells
@@ -13002,6 +13057,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         door_seed_learning_raw["collection_root"] = str(args.door_seed_collection_root)
     if args.door_seed_checkpoint is not None:
         door_seed_learning_raw["checkpoint_path"] = str(args.door_seed_checkpoint)
+    if args.door_seed_allow_source_code_hash_mismatch is not None:
+        door_seed_learning_raw["allow_source_code_hash_mismatch"] = bool(
+            args.door_seed_allow_source_code_hash_mismatch
+        )
     if args.door_seed_raw_source is not None:
         door_seed_learning_raw["raw_seed_source"] = str(args.door_seed_raw_source)
     if args.door_seed_collection_every_steps is not None:
@@ -13404,6 +13463,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.roomseg_coverage_eval = bool(args.roomseg_coverage_eval)
     args.roomseg_coverage_milestones = parse_coverage_milestones(
         args.roomseg_coverage_milestones
+    )
+    args.roomseg_full_voxel_milestones = (
+        None
+        if args.roomseg_full_voxel_milestones is None
+        else parse_coverage_milestones(args.roomseg_full_voxel_milestones)
     )
     if args.roomseg_coverage_eval:
         if args.sim_backend != "isaac":

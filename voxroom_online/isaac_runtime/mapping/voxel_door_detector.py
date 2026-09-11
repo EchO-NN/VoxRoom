@@ -128,6 +128,7 @@ class VoxelDoorDetectorConfig:
     primitive_min_line_correlation: float = 0.95
     primitive_max_orthogonal_variance_cells2: float = 0.65
     primitive_require_line_fit_quality: bool = True
+    enable_l_shaped_seed_branches: bool = False
     enable_seed_line_spur_pruning: bool = True
     seed_line_spur_prune_max_branch_length_ratio: float = 0.35
     seed_line_spur_prune_max_total_branch_ratio: float = 0.45
@@ -779,6 +780,7 @@ class StableDoorTrack:
     missed_updates: int = 0
     contradiction_count: int = 0
     ceiling_height_m: float | None = None
+    l_shape_arm: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -804,6 +806,7 @@ class StableDoorTrack:
             "missed_updates": int(self.missed_updates),
             "contradiction_count": int(self.contradiction_count),
             "ceiling_height_m": None if self.ceiling_height_m is None else float(self.ceiling_height_m),
+            "l_shape_arm": self.l_shape_arm,
         }
 
     @classmethod
@@ -851,6 +854,7 @@ class StableDoorTrack:
             missed_updates=int(data.get("missed_updates", 0) or 0),
             contradiction_count=int(data.get("contradiction_count", 0) or 0),
             ceiling_height_m=_finite_float_or_none(data.get("ceiling_height_m")),
+            l_shape_arm=data.get("l_shape_arm") if data.get("l_shape_arm") in {"h", "v"} else None,
         )
 
 
@@ -1035,6 +1039,7 @@ class VoxelDoorMemory:
                         missed_updates=0,
                         contradiction_count=0,
                         ceiling_height_m=observation_ceiling_height_m,
+                        l_shape_arm=candidate.debug.get("l_shape_arm"),
                     )
                 )
                 matched_ids.add(int(self._next_track_id))
@@ -1042,6 +1047,8 @@ class VoxelDoorMemory:
                 created += 1
                 continue
             best_track.last_seen_step = int(step)
+            if candidate.debug.get("l_shape_arm") in {"h", "v"}:
+                best_track.l_shape_arm = candidate.debug["l_shape_arm"]
             best_track.confidence = min(
                 1.0,
                 float(best_track.confidence) + float(getattr(cfg, "door_memory_confirm_increment", 0.35)),
@@ -1207,6 +1214,11 @@ class VoxelDoorMemory:
             dist = float(np.linalg.norm(candidate_center - track_center))
             track_major = self._normalized_vector(track.major_dir_rc)
             angle = float(np.degrees(np.arccos(min(1.0, max(-1.0, abs(float(np.dot(candidate_major, track_major))))))))
+            if (bool(getattr(cfg, "enable_l_shaped_seed_branches", False))
+                    and (candidate.debug.get("l_shape_arm") in {"h", "v"}
+                         or getattr(track, "l_shape_arm", None) in {"h", "v"})
+                    and angle > float(getattr(cfg, "door_memory_match_angle_deg", 20.0))):
+                continue
             stable_seed_mask = _cells_to_mask(getattr(track, "stable_seed_cells", []), shape)
             seed_overlap = 0.0
             if cand_count > 0:
@@ -1827,6 +1839,8 @@ def complete_voxel_doors_from_seeds(
                     "primitive_id": int(primitive.primitive_id),
                     "source_primitive_id": int(primitive.primitive_id),
                     "primitive_extraction_method": str(primitive.extraction_method),
+                    "l_shape_arm": primitive.debug.get("l_shape_arm"),
+                    "l_shape_joint_rc": primitive.debug.get("l_shape_joint_rc"),
                     "seed_line_primitive": primitive.to_dict(),
                     "accepted_orientation_source": str(getattr(cfg, "accepted_orientation_source", "seed_primitive_only")),
                     "axis_hv_for_accepted_disabled": not bool(getattr(cfg, "allow_axis_hv_for_accepted", False)),
@@ -1840,6 +1854,7 @@ def complete_voxel_doors_from_seeds(
             cid += 1
         if trial_candidates:
             selected = _select_best_cluster_candidate(trial_candidates)
+            group_selected = _select_seed_group_candidates(trial_candidates, cfg)
             selected_reason = (
                 "verified_partition"
                 if bool(selected.debug.get("partition_effective_verified", False))
@@ -1849,7 +1864,7 @@ def complete_voxel_doors_from_seeds(
                     else ("visual_candidate" if bool(selected.accepted) else "best_rejected_candidate")
                 )
             )
-            selected_candidates.append(selected)
+            selected_candidates.extend(group_selected)
             trial_groups.append(
                 DoorTrialCandidateGroup(
                     cluster_id=int(group.group_id),
@@ -1870,6 +1885,8 @@ def complete_voxel_doors_from_seeds(
                         "primitive_count_for_group": int(len(group_primitives)),
                         "accepted_primitive_count_for_group": int(len(accepted_primitives)),
                         "selected_primitive_id": int(selected.debug.get("primitive_id", 0) or 0),
+                        "selected_candidate_ids": [int(item.candidate_id) for item in group_selected],
+                        "selected_primitive_ids": [int(item.debug.get("primitive_id", 0) or 0) for item in group_selected],
                     },
                 )
             )
@@ -3470,6 +3487,20 @@ def extract_seed_line_primitives_from_group(
 ) -> list[DoorSeedLinePrimitive]:
     primitives: list[DoorSeedLinePrimitive] = []
     pid = int(primitive_id_start)
+    if bool(getattr(cfg, "enable_l_shaped_seed_branches", False)):
+        arms = _extract_l_shaped_seed_line_segments(group.seed_cells, cfg=cfg)
+        if arms:
+            for arm_cells, arm_debug in arms:
+                primitive = _build_seed_line_primitive(
+                    pid, group, arm_cells, shape=shape, resolution_m=float(resolution_m),
+                    cfg=cfg, extraction_method="l_shape_%s" % arm_debug["l_shape_arm"],
+                )
+                primitive.debug.update(arm_debug)
+                primitives.append(primitive)
+                pid += 1
+            # Both arms have been independently fitted and quality checked.
+            # Never replace this corner with a diagonal PCA fit of the whole L.
+            return primitives
     if str(group.group_kind) == "seed_pair_bridge":
         primitives.append(
             _build_seed_line_primitive(
@@ -3692,9 +3723,9 @@ def _primitive_reject_reason(
     if float(residual_cells) > float(max_residual) + 1e-6:
         return "primitive_residual_too_high"
     if bool(getattr(cfg, "primitive_require_line_fit_quality", True)):
-        if float(line_correlation) + 1e-6 < float(getattr(cfg, "primitive_min_line_correlation", 0.93)):
+        if float(line_correlation) + 1e-6 < float(getattr(cfg, "primitive_min_line_correlation", 0.95)):
             return "primitive_line_correlation_too_low"
-        if float(orthogonal_variance_cells2) > float(getattr(cfg, "primitive_max_orthogonal_variance_cells2", 0.75)) + 1e-6:
+        if float(orthogonal_variance_cells2) > float(getattr(cfg, "primitive_max_orthogonal_variance_cells2", 0.65)) + 1e-6:
             return "primitive_orthogonal_variance_too_high"
     if float(elongation) + 1e-6 < float(min_elongation):
         return "primitive_elongation_too_low"
@@ -3751,6 +3782,71 @@ def _primitive_line_fit_quality(
         return 1.0, orth_var
     line_correlation = float(np.sqrt(max(0.0, min(1.0, along_var / total))))
     return line_correlation, orth_var
+
+
+def _extract_l_shaped_seed_line_segments(
+    cells: Sequence[tuple[int, int]], *, cfg: VoxelDoorDetectorConfig,
+) -> list[tuple[list[tuple[int, int]], dict[str, object]]]:
+    """Recognize a supported axis-aligned corner; do not invent seed pixels.
+
+    Both runs must satisfy the existing minimum run length, meet at actual seed
+    pixels near their endpoints, and jointly explain the complete cluster within
+    its allowed thickness. This rejects broad blobs, isolated parallel lines and
+    interior crossings. Thick arms use actual central row/column support, as the
+    existing spur/parallel pruning does; all ordinary primitive checks still run.
+    """
+    clean = sorted(set((int(r), int(c)) for r, c in cells))
+    minimum = max(2, int(cfg.primitive_min_contiguous_seed_run_cells))
+    if len(clean) < 2 * minimum - 1:
+        return []
+    gap = max(1, int(round(float(cfg.primitive_contiguous_gap_cells))))
+    radius = max(0, (int(cfg.primitive_max_thickness_cells) - 1) // 2)
+    runs = {"h": [], "v": []}
+    for axis in ("h", "v"):
+        buckets: dict[int, list[int]] = {}
+        for r, c in clean:
+            fixed, along = (r, c) if axis == "h" else (c, r)
+            buckets.setdefault(fixed, []).append(along)
+        for fixed, values in sorted(buckets.items()):
+            values = sorted(set(values))
+            segments = [[values[0]]]
+            for value in values[1:]:
+                if value - segments[-1][-1] > gap:
+                    segments.append([])
+                segments[-1].append(value)
+            for segment in segments:
+                if len(segment) >= minimum:
+                    runs[axis].append((fixed, segment))
+    if not runs['h'] or not runs['v']:
+        return []
+    pts = np.asarray(clean, dtype=np.int32)
+    best = None
+    best_score = None
+    for row, cols in runs['h']:
+        for col, rows in runs['v']:
+            if col not in cols or row not in rows:
+                continue
+            if min(abs(col - cols[0]), abs(col - cols[-1])) > radius:
+                continue
+            if min(abs(row - rows[0]), abs(row - rows[-1])) > radius:
+                continue
+            h_band = ((np.abs(pts[:, 0] - row) <= radius)
+                      & (pts[:, 1] >= cols[0] - radius) & (pts[:, 1] <= cols[-1] + radius))
+            v_band = ((np.abs(pts[:, 1] - col) <= radius)
+                      & (pts[:, 0] >= rows[0] - radius) & (pts[:, 0] <= rows[-1] + radius))
+            if not np.all(h_band | v_band):
+                continue
+            score = (min(len(cols), len(rows)), len(cols) + len(rows), -row, -col)
+            if best_score is None or score > best_score:
+                best_score = score
+                best = (row, col, cols, rows)
+    if best is None:
+        return []
+    row, col, cols, rows = best
+    common = {"l_shape_joint_rc": [row, col], "l_shape_cluster_cells": len(clean),
+              "l_shape_support_radius_cells": radius, "l_shape_all_cluster_cells_explained": True}
+    return [([(row, c) for c in cols], {**common, "l_shape_arm": "h"}),
+            ([(r, col) for r in rows], {**common, "l_shape_arm": "v"})]
 
 
 def _extract_parallel_pruned_seed_line_segments(
@@ -4198,6 +4294,17 @@ def _infer_directions_from_local_free_neck(cluster: DoorSeedCluster, free_clean:
     if norm <= 1e-6:
         return []
     return [("local_free_neck_axis", major / norm)]
+
+
+def _select_seed_group_candidates(
+    candidates: Sequence[VoxelDoorLineCandidate], cfg: VoxelDoorDetectorConfig,
+) -> list[VoxelDoorLineCandidate]:
+    if bool(getattr(cfg, "enable_l_shaped_seed_branches", False)):
+        arms = {axis: [c for c in candidates if c.debug.get("l_shape_arm") == axis]
+                for axis in ("h", "v")}
+        if arms['h'] or arms['v']:
+            return [_select_best_cluster_candidate(arms[axis]) for axis in ("h", "v") if arms[axis]]
+    return [_select_best_cluster_candidate(candidates)]
 
 
 def _select_best_cluster_candidate(candidates: Sequence[VoxelDoorLineCandidate]) -> VoxelDoorLineCandidate:
@@ -5048,6 +5155,7 @@ def _batch_reject_conflicting_doors(
         item.debug["voxel_door_conflict_policy"] = "accepted_doors_only_nav_free_seedline_overlap"
     nonfree_intersection_ignored_count = 0
     nav_free_intersection_reject_count = 0
+    shared_l_corner_ignored_count = 0
     def conflict_key(item: VoxelDoorLineCandidate) -> tuple[float, int, int, int, int, int]:
         return (
             float(item.debug.get("score", 0.0)),
@@ -5080,6 +5188,14 @@ def _batch_reject_conflicting_doors(
             overlap = line_masks[a.candidate_id] & line_masks[b.candidate_id]
             if not np.any(overlap):
                 continue
+            # Only the actual, shared corner of two independently checked arms
+            # of the SAME detected L is allowed. Unrelated crossings retain the
+            # previous conflict policy and cannot use this exception.
+            if bool(getattr(cfg, "enable_l_shaped_seed_branches", False)) and _is_shared_l_seed_corner(a, b, overlap):
+                shared_l_corner_ignored_count += 1
+                a.debug["partition_shared_l_corner_allowed"] = True
+                b.debug["partition_shared_l_corner_allowed"] = True
+                continue
             nav_free_intersection_reject_count += 1
             overlap_cells = int(np.count_nonzero(overlap))
             a.debug["partition_nav_free_intersection_cells"] = int(a.debug.get("partition_nav_free_intersection_cells", 0) or 0) + overlap_cells
@@ -5102,7 +5218,24 @@ def _batch_reject_conflicting_doors(
         "voxel_door_partition_reject_raw_seed_conflict_count": 0,
         "voxel_door_partition_nonfree_intersection_ignored_count": int(nonfree_intersection_ignored_count),
         "voxel_door_partition_nav_free_intersection_reject_count": int(nav_free_intersection_reject_count),
+        "voxel_door_partition_shared_l_corner_ignored_count": int(shared_l_corner_ignored_count),
     }
+
+
+def _is_shared_l_seed_corner(a, b, overlap: np.ndarray) -> bool:
+    if {a.debug.get("l_shape_arm"), b.debug.get("l_shape_arm")} != {"h", "v"}:
+        return False
+    group = a.debug.get("seed_group_id")
+    if group is None or group != b.debug.get("seed_group_id"):
+        return False
+    joint_a, joint_b = a.debug.get("l_shape_joint_rc"), b.debug.get("l_shape_joint_rc")
+    if joint_a is None or joint_b is None or tuple(joint_a) != tuple(joint_b):
+        return False
+    joint = tuple(map(int, joint_a))
+    if joint not in set(map(tuple, a.seed_cells)) or joint not in set(map(tuple, b.seed_cells)):
+        return False
+    return bool(np.count_nonzero(overlap) == 1 and 0 <= joint[0] < overlap.shape[0]
+                and 0 <= joint[1] < overlap.shape[1] and overlap[joint])
 
 
 def _infer_single_seed_direction(

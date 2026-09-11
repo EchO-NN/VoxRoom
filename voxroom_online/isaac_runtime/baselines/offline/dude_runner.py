@@ -4,6 +4,7 @@ import os
 import shlex
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,9 +19,18 @@ from voxroom_online.isaac_runtime.evaluation.online_roomseg.common import (
 )
 
 from ..data_contract import resolve_map_info
-from ..mask_io import build_metric_domain_from_source, enforce_room_mask_contract
-from ..ros_subprocess import RosSubprocessConfig, run_ros_module
+from ..mask_io import (
+    build_segmentation_domain_from_source,
+    enforce_room_mask_contract,
+)
+from ..ros_subprocess import (
+    RosSubprocessConfig,
+    run_ros_module,
+    runtime_ros_env_export_lines,
+    runtime_ros_master_port,
+)
 from .base import BaselineResult, MissingOriginalImplementationError
+from .dude_image_io import labels_from_tagged_image
 
 
 BASELINE_NAME = "dude_incremental"
@@ -52,7 +62,7 @@ class DudeIncrementalRunner:
         self,
         *,
         repo_root: Path | str | None = None,
-        concavity_threshold_m: float = 3.0,
+        concavity_threshold_m: float = 2.5,
         use_incremental: bool = True,
         fallback_python: bool = False,
         allow_python_fallback: bool | None = None,
@@ -66,6 +76,7 @@ class DudeIncrementalRunner:
         self.dude_ws = Path(dude_ws) if dude_ws else _env_path("DUDE_WS")
         self.concavity_threshold_m = float(concavity_threshold_m)
         self.use_incremental = bool(use_incremental)
+        self.baseline_name = "dude_incremental" if self.use_incremental else "dude_offline"
         self.fallback_python = bool(fallback_python if allow_python_fallback is None else allow_python_fallback)
         self.map_resolution_m = None if map_resolution_m is None else float(map_resolution_m)
         self.ros_config = RosSubprocessConfig.from_env(
@@ -76,9 +87,12 @@ class DudeIncrementalRunner:
         )
         self.scene_id: str | None = None
         self._last_step: int | None = None
+        self._last_result: BaselineResult | None = None
         self._repo_status: OriginalDudeRepoStatus | None = None
         self._roscore_process: subprocess.Popen[bytes] | None = None
         self._node_process: subprocess.Popen[bytes] | None = None
+        self._node_output = None
+        self._roscore_output = None
 
     @property
     def repo_status(self) -> OriginalDudeRepoStatus | None:
@@ -87,6 +101,7 @@ class DudeIncrementalRunner:
     def start_scene(self, scene_id: str) -> None:
         self.scene_id = str(scene_id)
         self._last_step = None
+        self._last_result = None
         self._repo_status = inspect_original_dude_repo(self.repo_root)
         if self.fallback_python:
             return
@@ -100,40 +115,76 @@ class DudeIncrementalRunner:
                 "Incremental_DuDe_ROS is not cloned/built enough for native DUDE. "
                 f"repo_status={asdict(self._repo_status)}"
             )
-        self._start_original_node()
+        if self.use_incremental:
+            self._start_original_node()
+        else:
+            self._start_roscore()
 
     def segment_snapshot(self, snapshot_path: Path, arrays: Mapping[str, Any]) -> BaselineResult:
         step = _snapshot_step(Path(snapshot_path), arrays)
-        if self.use_incremental and self._last_step is not None and step <= self._last_step:
+        if self.use_incremental and self._last_step is not None and step < self._last_step:
             raise ValueError(
-                "Incremental DUDE requires strictly increasing snapshot steps within one scene: "
+                "Incremental DUDE requires non-decreasing snapshot steps within one scene: "
                 f"previous={self._last_step}, current={step}, snapshot={snapshot_path}"
+            )
+        if self.use_incremental and self._last_step == step:
+            if self._last_result is None:
+                raise RuntimeError("same-step DUDE replay has no cached result")
+            metadata = dict(self._last_result.metadata)
+            metadata.update(
+                {
+                    "source_snapshot": str(snapshot_path),
+                    "same_step_result_reused": True,
+                }
+            )
+            return BaselineResult(
+                label_map=np.asarray(self._last_result.label_map, dtype=np.int32).copy(),
+                metadata=metadata,
+                debug_arrays={
+                    key: np.asarray(value).copy()
+                    for key, value in self._last_result.debug_arrays.items()
+                },
             )
         self._last_step = int(step)
 
         if not self.fallback_python:
             if self._repo_status is None:
                 self._repo_status = inspect_original_dude_repo(self.repo_root)
-            return run_ros_module(
-                "voxroom_online.isaac_runtime.baselines.offline.ros_entrypoints.dude_ros_node",
-                method=self.baseline_name,
-                snapshot_path=snapshot_path,
-                arrays=arrays,
-                scene_id=self.scene_id,
-                params={
-                    "scene_id": self.scene_id,
-                    "input_topic": "/map",
-                    "output_topic": "/tagged_image",
-                    "timeout_s": float(self.ros_config.timeout_s),
-                    "map_resolution_m": self.map_resolution_m,
-                    "concavity_threshold_m": float(self.concavity_threshold_m),
-                    "original_repo_commit": self._repo_status.git_head,
-                    "original_repo_reference_commit": UPSTREAM_HEAD_AT_IMPLEMENTATION,
-                },
-                config=self.ros_config,
-            )
+            if not self.use_incremental:
+                # The upstream node performs a full DuDe decomposition for its
+                # first map, then switches to incremental differences.  A fresh
+                # node per snapshot therefore reproduces the paper's offline
+                # DUDE variant without changing upstream source code.
+                self._start_original_node()
+            try:
+                result = run_ros_module(
+                    "voxroom_online.isaac_runtime.baselines.offline.ros_entrypoints.dude_ros_node",
+                    method=self.baseline_name,
+                    snapshot_path=snapshot_path,
+                    arrays=arrays,
+                    scene_id=self.scene_id,
+                    params={
+                        "scene_id": self.scene_id,
+                        "input_topic": "/map",
+                        "output_topic": "/tagged_image",
+                        "timeout_s": float(self.ros_config.timeout_s),
+                        "map_resolution_m": self.map_resolution_m,
+                        "concavity_threshold_m": float(self.concavity_threshold_m),
+                        "use_incremental": bool(self.use_incremental),
+                        "state_reset_scope": "scene" if self.use_incremental else "snapshot",
+                        "original_repo_commit": self._repo_status.git_head,
+                        "original_repo_reference_commit": UPSTREAM_HEAD_AT_IMPLEMENTATION,
+                    },
+                    config=self.ros_config,
+                )
+                if self.use_incremental:
+                    self._last_result = result
+                return result
+            finally:
+                if not self.use_incremental:
+                    self._stop_original_node(keep_roscore=True)
 
-        free = build_metric_domain_from_source(arrays)
+        free, segmentation_source = build_segmentation_domain_from_source(arrays)
         binary = source_snapshot_to_dude_binary(arrays)
         labels = python_fallback_segment(binary, free)
         labels = enforce_room_mask_contract(labels, arrays, clip_to_eval_domain=True)
@@ -150,6 +201,7 @@ class DudeIncrementalRunner:
             "scene_id": self.scene_id,
             "step": int(step),
             "input_free_definition": _input_free_definition(arrays),
+            "segmentation_source": segmentation_source,
             "unknown_treated_as": "occupied/inaccessible",
             "binary_free_value": 255,
             "binary_occupied_value": 0,
@@ -178,41 +230,61 @@ class DudeIncrementalRunner:
         debug = {
             "dude_binary_map": binary,
         }
-        return BaselineResult(label_map=np.asarray(labels, dtype=np.int32), metadata=metadata, debug_arrays=debug)
+        result = BaselineResult(
+            label_map=np.asarray(labels, dtype=np.int32),
+            metadata=metadata,
+            debug_arrays=debug,
+        )
+        if self.use_incremental:
+            self._last_result = result
+        return result
 
     def end_scene(self) -> None:
         self._stop_original_node()
         self.scene_id = None
         self._last_step = None
+        self._last_result = None
 
     def _start_original_node(self) -> None:
-        self._stop_original_node()
+        self._stop_original_node(keep_roscore=True)
         self._start_roscore()
         cmd = build_dude_rosrun_shell(self.ros_config, concavity_threshold_m=self.concavity_threshold_m)
+        # Native DUDE logs every contour. An unread PIPE can fill and freeze
+        # processing before a tagged image is published on cluttered maps.
+        self._node_output = tempfile.TemporaryFile(mode="w+b")
         self._node_process = subprocess.Popen(
             ["bash", "-lc", cmd],
             cwd=str(self.ros_config.repo_root),
-            stdout=subprocess.PIPE,
+            stdout=self._node_output,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         time.sleep(2.0)
         if self._node_process.poll() is not None:
             output = ""
-            if self._node_process.stdout is not None:
+            if self._node_output is not None:
                 try:
-                    output = self._node_process.stdout.read(20000).decode("utf-8", "replace")
+                    self._node_output.seek(0)
+                    output = self._node_output.read(20000).decode("utf-8", "replace")
                 except Exception:
                     output = ""
             raise MissingOriginalImplementationError("Incremental_DuDe_ROS node exited during startup:\n%s" % output)
 
-    def _stop_original_node(self) -> None:
+    def _stop_original_node(self, *, keep_roscore: bool = False) -> None:
         process = self._node_process
         self._node_process = None
         _terminate_process_group(process)
+        if self._node_output is not None:
+            self._node_output.close()
+            self._node_output = None
+        if keep_roscore:
+            return
         roscore_process = self._roscore_process
         self._roscore_process = None
         _terminate_process_group(roscore_process)
+        if self._roscore_output is not None:
+            self._roscore_output.close()
+            self._roscore_output = None
 
     def _start_roscore(self) -> None:
         roscore_process = self._roscore_process
@@ -222,10 +294,11 @@ class DudeIncrementalRunner:
             self._roscore_process = None
             return
         cmd = build_roscore_shell(self.ros_config)
+        self._roscore_output = tempfile.TemporaryFile(mode="w+b")
         self._roscore_process = subprocess.Popen(
             ["bash", "-lc", cmd],
             cwd=str(self.ros_config.repo_root),
-            stdout=subprocess.PIPE,
+            stdout=self._roscore_output,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -236,9 +309,10 @@ class DudeIncrementalRunner:
                 break
             if process.poll() is not None:
                 output = ""
-                if process.stdout is not None:
+                if self._roscore_output is not None:
                     try:
-                        output = process.stdout.read(20000).decode("utf-8", "replace")
+                        self._roscore_output.seek(0)
+                        output = self._roscore_output.read(20000).decode("utf-8", "replace")
                     except Exception:
                         output = ""
                 self._roscore_process = None
@@ -314,7 +388,7 @@ def inspect_original_dude_repo(repo_root: Path | str | None) -> OriginalDudeRepo
 
 
 def source_snapshot_to_dude_binary(arrays: Mapping[str, Any]) -> np.ndarray:
-    free = build_metric_domain_from_source(arrays)
+    free, _source = build_segmentation_domain_from_source(arrays)
     binary = np.zeros(free.shape, dtype=np.uint8)
     binary[free] = np.uint8(255)
     return binary
@@ -327,26 +401,6 @@ def python_fallback_segment(binary: np.ndarray, free_domain: np.ndarray | None =
     structure = np.asarray([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=np.uint8)
     labels, _ = ndimage.label(free, structure=structure)
     return relabel_positive_labels_sequentially(labels.astype(np.int32))
-
-
-def labels_from_tagged_image(tagged_image: np.ndarray, source_arrays: Mapping[str, Any]) -> np.ndarray:
-    image = np.asarray(tagged_image)
-    if image.ndim == 2:
-        labels = np.asarray(image, dtype=np.int32).copy()
-        labels[labels < 0] = 0
-        return enforce_room_mask_contract(labels, source_arrays, clip_to_eval_domain=True)
-    if image.ndim == 3 and image.shape[2] in (3, 4):
-        rgb = np.asarray(image[..., :3], dtype=np.uint8)
-        flat = rgb.reshape(-1, 3)
-        labels = np.zeros(flat.shape[0], dtype=np.int32)
-        next_label = 1
-        for color in sorted({tuple(int(v) for v in row) for row in flat.tolist()}):
-            if color in {(0, 0, 0), (208, 208, 208)}:
-                continue
-            labels[np.all(flat == np.asarray(color, dtype=np.uint8), axis=1)] = next_label
-            next_label += 1
-        return enforce_room_mask_contract(labels.reshape(rgb.shape[:2]), source_arrays, clip_to_eval_domain=True)
-    raise ValueError(f"unsupported DUDE tagged image shape: {image.shape}")
 
 
 def _snapshot_step(path: Path, arrays: Mapping[str, Any]) -> int:
@@ -425,6 +479,9 @@ def _env_path(name: str) -> Path | None:
 
 
 def build_dude_rosrun_shell(config: RosSubprocessConfig, *, concavity_threshold_m: float) -> str:
+    threshold = float(concavity_threshold_m)
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError("DUDE concavity threshold must be finite and positive")
     lines = ["set -euo pipefail"]
     if config.ros_setup:
         setup = shlex.quote(str(config.ros_setup))
@@ -435,9 +492,10 @@ def build_dude_rosrun_shell(config: RosSubprocessConfig, *, concavity_threshold_
     for setup in config.workspace_setups:
         quoted = shlex.quote(str(setup))
         lines.append(f"if [ -f {quoted} ]; then set +u; source {quoted}; set -u; fi")
+    lines.extend(runtime_ros_env_export_lines())
     lines.append(
         "exec rosrun inc_dude inc_dude %s"
-        % shlex.quote(str(int(round(float(concavity_threshold_m)))))
+        % shlex.quote(str(threshold))
     )
     return "\n".join(lines)
 
@@ -450,7 +508,9 @@ def build_roscore_shell(config: RosSubprocessConfig) -> str:
         lines.append("set +u")
         lines.append(f"source {setup}")
         lines.append("set -u")
-    lines.append("exec roscore")
+    lines.extend(runtime_ros_env_export_lines())
+    master_port = runtime_ros_master_port()
+    lines.append("exec roscore" if master_port is None else f"exec roscore -p {master_port}")
     return "\n".join(lines)
 
 
@@ -462,6 +522,7 @@ def build_ros_master_probe_shell(config: RosSubprocessConfig) -> str:
         lines.append("set +u")
         lines.append(f"source {setup}")
         lines.append("set -u")
+    lines.extend(runtime_ros_env_export_lines())
     lines.append("rostopic list >/dev/null")
     return "\n".join(lines)
 

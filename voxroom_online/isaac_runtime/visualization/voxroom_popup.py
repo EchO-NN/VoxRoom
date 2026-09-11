@@ -67,6 +67,7 @@ class VoxRoomPopupVisualizer:
         show_room_proposals: bool = True,
         show_room_masks: bool = True,
         show_room_labels: bool = True,
+        show_tvars_original_mask: bool = True,
         show_rose_occupancy_map: bool = True,
         show_frontier_member_cells: bool = True,
         show_object_nodes: bool = True,
@@ -86,6 +87,7 @@ class VoxRoomPopupVisualizer:
         self.show_room_proposals = bool(show_room_proposals)
         self.show_room_masks = bool(show_room_masks)
         self.show_room_labels = bool(show_room_labels)
+        self.show_tvars_original_mask = bool(show_tvars_original_mask)
         self.show_rose_occupancy_map = bool(show_rose_occupancy_map)
         self.show_frontier_member_cells = bool(show_frontier_member_cells)
         self.show_object_nodes = bool(show_object_nodes)
@@ -138,8 +140,13 @@ class VoxRoomPopupVisualizer:
                 str(self.panel_size[1]),
             ]
             env = os.environ.copy()
-            existing_pythonpath = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = str(root) if not existing_pythonpath else str(root) + os.pathsep + existing_pythonpath
+            # The worker can deliberately run under a non-Isaac Python.  Do
+            # not leak Isaac's CPython-specific pip_prebundle into that
+            # interpreter: packages such as Pillow otherwise import a 3.11
+            # Python module beside a 3.10 binary extension and fail before the
+            # OpenCV window is created.  The repository root is the only
+            # PYTHONPATH entry the worker needs.
+            env["PYTHONPATH"] = str(root)
             env["PYTHONUNBUFFERED"] = "1"
             if os.environ.get("ISAAC_BENCH_KEEP_POPUP_LD_LIBRARY_PATH", "").lower() not in {"1", "true", "yes"}:
                 env.pop("LD_LIBRARY_PATH", None)
@@ -536,6 +543,8 @@ class VoxRoomPopupVisualizer:
         return np.asarray(panel, dtype=np.uint8)
 
     def _has_live_baseline_preview(self) -> bool:
+        if not self.show_tvars_original_mask:
+            return False
         debug = self._room_segmentation_debug
         if not isinstance(debug, Mapping):
             return False
@@ -551,6 +560,8 @@ class VoxRoomPopupVisualizer:
         self,
         crop_bounds: Optional[Tuple[int, int, int, int]] = None,
     ) -> Optional[Image.Image]:
+        if not self.show_tvars_original_mask:
+            return None
         debug = self._room_segmentation_debug
         if not isinstance(debug, Mapping):
             return None

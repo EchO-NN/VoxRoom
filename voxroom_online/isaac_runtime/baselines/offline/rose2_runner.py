@@ -16,6 +16,10 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from voxroom_online.isaac_runtime.baselines.mask_io import (
+    build_segmentation_domain_from_source,
+)
+
 try:
     from voxroom_online.isaac_runtime.baselines.offline.base import BaselineResult, MissingOriginalImplementationError
     from voxroom_online.isaac_runtime.baselines.ros_subprocess import RosSubprocessConfig, run_ros_module
@@ -108,15 +112,21 @@ def inspect_ros_dependency_status() -> dict[str, Any]:
 
 def build_occupancy_grid_values(arrays: Mapping[str, np.ndarray]) -> tuple[np.ndarray, dict[str, Any]]:
     shape = infer_snapshot_shape(arrays)
-    occupied = _first_bool_array(arrays, ("obstacle_mask", "occupancy_map", "voxel_nav_occupied_xy", "voxel_wall_xy"), shape)
-    free, free_key = _first_nonempty_bool_array(
+    free, free_key = build_segmentation_domain_from_source(arrays)
+    occupied = _first_bool_array(
         arrays,
-        ("navigation_free_room_domain", "observed_free_mask", "voxel_nav_free_xy", "vertical_free_room_domain"),
+        (
+            "voxel_wall_xy",
+            "structural_wall_clean",
+            "roomseg_sanitized_wall",
+            "obstacle_mask",
+            "occupancy_map",
+            "voxel_nav_occupied_xy",
+        ),
         shape,
     )
-    unknown = _first_bool_array(arrays, ("unknown_mask", "voxel_nav_unknown_xy"), shape)
-    if unknown is None:
-        unknown = ~(free | occupied)
+    occupied &= ~free
+    unknown = ~(free | occupied)
 
     data = np.full(shape, ROSE2_INPUT_OCCUPANCY_VALUES["unknown"], dtype=np.int16)
     data[free] = ROSE2_INPUT_OCCUPANCY_VALUES["free"]
@@ -338,21 +348,9 @@ def enforce_room_mask_contract(label_map: np.ndarray, arrays: Mapping[str, np.nd
 def build_output_domain(arrays: Mapping[str, np.ndarray], shape: tuple[int, int] | None = None) -> np.ndarray:
     if shape is None:
         shape = infer_snapshot_shape(arrays)
-    for key in ("navigation_free_room_domain", "observed_free_mask", "voxel_nav_free_xy", "vertical_free_room_domain"):
-        value = arrays.get(key)
-        if value is None:
-            continue
-        arr = np.asarray(value, dtype=bool)
-        if arr.shape == shape and np.any(arr):
-            domain = arr.copy()
-            break
-    else:
-        domain = np.ones(shape, dtype=bool)
-    obstacle = _first_bool_array(arrays, ("obstacle_mask", "occupancy_map", "voxel_nav_occupied_xy"), shape)
-    unknown = _first_bool_array(arrays, ("unknown_mask", "voxel_nav_unknown_xy"), shape)
-    domain &= ~obstacle
-    if unknown is not None:
-        domain &= ~unknown
+    domain, _source = build_segmentation_domain_from_source(arrays)
+    if domain.shape != shape:
+        raise ValueError("ROSE2 Vertical-Free domain shape does not match snapshot")
     return domain
 
 
@@ -435,7 +433,11 @@ class Rose2Runner:
         roslaunch = shutil.which("roslaunch", path=env.get("PATH"))
         if roslaunch is None:
             raise Rose2DependencyError(_format_dependency_error(inspect_ros_dependency_status()))
-        cmd = [roslaunch, self.rose_package, self.launch_file]
+        launch_path = Path(self.launch_file).expanduser()
+        if launch_path.is_file():
+            cmd = [roslaunch, str(launch_path.resolve())]
+        else:
+            cmd = [roslaunch, self.rose_package, self.launch_file]
         self._launch_process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,

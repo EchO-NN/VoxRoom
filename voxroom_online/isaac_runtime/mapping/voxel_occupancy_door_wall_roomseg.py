@@ -613,8 +613,6 @@ def _expand_raw_seed_result_to_stage_union(
     original_mask = np.asarray(raw_result.door_seed_mask, dtype=bool)
     if union_mask.shape != original_mask.shape:
         raise ValueError("combined raw-seed mask does not match the VoxRoom seed grid")
-    if np.any(original_mask & ~union_mask):
-        raise ValueError("combined raw-seed mask removed a VoxRoom raw seed")
     labels, component_count = ndimage.label(
         union_mask,
         structure=conn(int(seed_connectivity)),
@@ -664,9 +662,8 @@ class VoxelOccupancyDoorWallRoomSegmenter:
         )
         self.door_seed_raw_seed_accumulator = (
             VoxroomTvarsRawSeedAccumulator(self.config.door_seed_learning)
-            if self.config.door_seed_learning.mode == "inference"
-            and self.config.door_seed_learning.raw_seed_source
-            == "voxroom_tvars_vertical_union"
+            if self.config.door_seed_learning.mode in {"inference", "rules_only"}
+            and self.config.door_seed_learning.raw_seed_source != "voxroom"
             else None
         )
         self.door_memory = VoxelDoorMemory(self.config.door)
@@ -1416,6 +1413,37 @@ def run_voxel_occupancy_door_wall_roomseg(
         | projected_wall_map
         | step1_gap_fill_map
     )
+    voxroom_raw_seed_mask = np.asarray(
+        door_seed_stage.voxroom_raw_seed_mask_xy
+        if door_seed_stage.voxroom_raw_seed_mask_xy is not None
+        else raw_door_seed_mask,
+        dtype=bool,
+    )
+    tvars_vertical_raw_seed_mask = np.asarray(
+        door_seed_stage.tvars_vertical_raw_seed_mask_xy
+        if door_seed_stage.tvars_vertical_raw_seed_mask_xy is not None
+        else np.zeros(shape, dtype=bool),
+        dtype=bool,
+    )
+    voxroom_raw_seed_history_mask = np.asarray(
+        door_seed_stage.voxroom_raw_seed_history_mask_xy
+        if door_seed_stage.voxroom_raw_seed_history_mask_xy is not None
+        else voxroom_raw_seed_mask,
+        dtype=bool,
+    )
+    tvars_vertical_raw_seed_history_mask = np.asarray(
+        door_seed_stage.tvars_vertical_raw_seed_history_mask_xy
+        if door_seed_stage.tvars_vertical_raw_seed_history_mask_xy is not None
+        else tvars_vertical_raw_seed_mask,
+        dtype=bool,
+    )
+    raw_seed_source_id_map = np.zeros(shape, dtype=np.uint8)
+    raw_seed_source_id_map[tvars_vertical_raw_seed_history_mask] = 2
+    raw_seed_source_id_map[voxroom_raw_seed_history_mask] = 1
+    raw_seed_source_id_map[
+        voxroom_raw_seed_history_mask & tvars_vertical_raw_seed_history_mask
+    ] = 3
+
     layers = {
         "voxel_nav_free_xy": nav_free_mask.astype(bool),
         "voxel_door_seed_no_clearance_free_xy": door_seed_free_mask.astype(bool),
@@ -1530,6 +1558,11 @@ def run_voxel_occupancy_door_wall_roomseg(
         "voxel_wall_base_map": wall_base_pre_step1,
         "voxel_door_seed_mask": door_seed_mask,
         "voxel_door_raw_seed_mask": raw_door_seed_mask,
+        "voxel_voxroom_raw_seed_mask": voxroom_raw_seed_mask,
+        "voxel_tvars_vertical_raw_seed_mask": tvars_vertical_raw_seed_mask,
+        "voxel_voxroom_raw_seed_history_mask": voxroom_raw_seed_history_mask,
+        "voxel_tvars_vertical_raw_seed_history_mask": tvars_vertical_raw_seed_history_mask,
+        "voxel_raw_seed_source_id_map": raw_seed_source_id_map,
         "voxel_door_seed_model_probability_xy": np.asarray(
             door_seed_result.debug.get(
                 "voxel_door_seed_model_probability_xy",
