@@ -3,6 +3,7 @@
 ## Room Segmentation from Partial Observations during Robot Exploration
 
 **Submitted to ICRA 2027 — Under Review.**
+
 **Project maintainer and code contributor:** [EchO-NN](https://github.com/EchO-NN) · [2579947814@qq.com](mailto:2579947814@qq.com)
 
 [Pipeline](#pipeline) · [Demos](#demonstrations) · [Installation](#installation) · [Reproduction](docs/reproduction.md) · [Results](#evaluation) · [Method details](docs/method.md)
